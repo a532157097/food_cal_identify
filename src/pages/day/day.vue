@@ -30,6 +30,7 @@
 
 <script>
 import { ensureLogin, request, resolveUrl, uploadRetake } from '../../utils/api.js'
+import { compressPhoto } from '../../utils/image.js'
 import { calorieLevel, foodNames, formatKcal } from '../../utils/format.js'
 
 export default {
@@ -110,7 +111,12 @@ export default {
           const paths = res.tempFilePaths || []
           if (!paths.length) return
           this.retakingId = item.id
-          uploadRetake(item.id, paths[0])
+          uni.showLoading({ title: '正在压缩', mask: true })
+          compressPhoto(paths[0])
+            .then((path) => {
+              uni.hideLoading()
+              return uploadRetake(item.id, path)
+            })
             .then(() => {
               uni.showToast({ title: '已更新，时间未变', icon: 'none' })
               return this.load()

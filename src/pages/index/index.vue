@@ -98,6 +98,7 @@
 import BottomNav from '../../components/bottom-nav.vue'
 import { clearAuth, ensureLogin, getAuth, request, resolveUrl, uploadIdentify, uploadRetake } from '../../utils/api.js'
 import { calorieLevel, foodNames, formatGram, formatKcal } from '../../utils/format.js'
+import { compressPhoto } from '../../utils/image.js'
 
 export default {
   components: { BottomNav },
@@ -139,8 +140,15 @@ export default {
         success: (res) => {
           const paths = res.tempFilePaths || []
           if (!paths.length) return
-          this.imagePath = paths[0]
           this.errorText = ''
+          uni.showLoading({ title: '正在压缩', mask: true })
+          compressPhoto(paths[0])
+            .then((path) => {
+              this.imagePath = path
+            })
+            .then(() => {
+              uni.hideLoading()
+            })
         },
         fail: (err) => {
           const msg = (err && err.errMsg) || ''
@@ -229,7 +237,12 @@ export default {
           const paths = res.tempFilePaths || []
           if (!paths.length) return
           this.retakingId = item.id
-          uploadRetake(item.id, paths[0])
+          uni.showLoading({ title: '正在压缩', mask: true })
+          compressPhoto(paths[0])
+            .then((path) => {
+              uni.hideLoading()
+              return uploadRetake(item.id, path)
+            })
             .then(() => {
               uni.showToast({ title: '已更新，时间未变', icon: 'none' })
               return this.loadToday()
