@@ -277,6 +277,14 @@ export default {
         },
       })
     },
+    clearPreview() {
+      // #ifdef H5
+      if (this.imagePath && this.imagePath.indexOf('blob:') === 0) {
+        URL.revokeObjectURL(this.imagePath)
+      }
+      // #endif
+      this.imagePath = ''
+    },
     submit() {
       if (!getAuth()) {
         this.goLogin()
@@ -290,6 +298,7 @@ export default {
       this.errorText = ''
       uploadIdentify(this.imagePath)
         .then((record) => {
+          this.clearPreview()
           uni.navigateTo({ url: '/pages/result/result?id=' + record.id })
         })
         .catch((err) => {
