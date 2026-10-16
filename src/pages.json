@@ -1,0 +1,59 @@
+{
+  "pages": [
+    {
+      "path": "pages/index/index",
+      "style": {
+        "navigationBarTitleText": "膳识",
+        "navigationStyle": "custom",
+        "backgroundColor": "#F5F6F8"
+      }
+    },
+    {
+      "path": "pages/month/month",
+      "style": {
+        "navigationBarTitleText": "本月",
+        "navigationStyle": "custom",
+        "backgroundColor": "#F5F6F8"
+      }
+    },
+    {
+      "path": "pages/day/day",
+      "style": {
+        "navigationBarTitleText": "当天记录",
+        "navigationBarBackgroundColor": "#F5F6F8",
+        "backgroundColor": "#F5F6F8"
+      }
+    },
+    {
+      "path": "pages/login/login",
+      "style": {
+        "navigationBarTitleText": "登录",
+        "navigationBarBackgroundColor": "#F5F6F8",
+        "backgroundColor": "#F5F6F8"
+      }
+    },
+    {
+      "path": "pages/register/register",
+      "style": {
+        "navigationBarTitleText": "注册",
+        "navigationBarBackgroundColor": "#F5F6F8",
+        "backgroundColor": "#F5F6F8"
+      }
+    },
+    {
+      "path": "pages/result/result",
+      "style": {
+        "navigationBarTitleText": "识别结果",
+        "navigationBarBackgroundColor": "#F5F6F8",
+        "backgroundColor": "#F5F6F8"
+      }
+    }
+  ],
+  "globalStyle": {
+    "navigationBarTextStyle": "black",
+    "navigationBarTitleText": "膳识",
+    "navigationBarBackgroundColor": "#F5F6F8",
+    "backgroundColor": "#F5F6F8",
+    "backgroundTextStyle": "dark"
+  }
+}

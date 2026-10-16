@@ -1,0 +1,11 @@
+.git
+node_modules
+dist
+server/.venv
+server/.env
+server/data
+server/uploads
+tests
+**/__pycache__
+**/*.pyc
+*.md
