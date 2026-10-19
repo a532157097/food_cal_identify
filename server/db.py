@@ -27,6 +27,15 @@ CREATE TABLE IF NOT EXISTS auth_session (
     user_id INTEGER NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS energy_daily (
+    user_id INTEGER NOT NULL,
+    day TEXT NOT NULL,
+    resting_kcal REAL NOT NULL,
+    active_kcal REAL NOT NULL,
+    total_kcal REAL NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, day)
+);
 """
 
 
@@ -256,6 +265,67 @@ def delete_record(db_path, record_id, user_id):
         )
         conn.commit()
         return row["image_path"]
+    finally:
+        conn.close()
+
+
+def save_energy_day(db_path, user_id, day, resting_kcal, active_kcal, updated_at):
+    total = round(float(resting_kcal) + float(active_kcal), 2)
+    resting = round(float(resting_kcal), 2)
+    active = round(float(active_kcal), 2)
+    conn = connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO energy_daily (
+                user_id, day, resting_kcal, active_kcal, total_kcal, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, day) DO UPDATE SET
+                resting_kcal = excluded.resting_kcal,
+                active_kcal = excluded.active_kcal,
+                total_kcal = excluded.total_kcal,
+                updated_at = excluded.updated_at
+            """,
+            (user_id, day, resting, active, total, updated_at),
+        )
+        conn.commit()
+        return {
+            "date": day,
+            "resting_kcal": resting,
+            "active_kcal": active,
+            "total_kcal": total,
+            "saved": True,
+        }
+    finally:
+        conn.close()
+
+
+def get_energy_day(db_path, user_id, day):
+    conn = connect(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT day, resting_kcal, active_kcal, total_kcal
+            FROM energy_daily
+            WHERE user_id = ? AND day = ?
+            """,
+            (user_id, day),
+        ).fetchone()
+        if row is None:
+            return {
+                "date": day,
+                "resting_kcal": 0,
+                "active_kcal": 0,
+                "total_kcal": 0,
+                "saved": False,
+            }
+        return {
+            "date": row["day"],
+            "resting_kcal": row["resting_kcal"],
+            "active_kcal": row["active_kcal"],
+            "total_kcal": row["total_kcal"],
+            "saved": True,
+        }
     finally:
         conn.close()
 

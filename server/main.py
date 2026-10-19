@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -23,12 +23,14 @@ from .db import (
     find_user_by_token,
     find_user_by_username,
     calendar_month,
+    get_energy_day,
     get_record,
     init_db,
     insert_record,
     list_records,
     list_records_on_day,
     replace_record,
+    save_energy_day,
 )
 from .parser import parse_workflow_payload
 from .passwords import hash_password, new_token, verify_password
@@ -96,6 +98,33 @@ def create_app():
             delete_session(app.state.settings["db_path"], token)
         return {"ok": True}
 
+    @app.post("/api/identify/submit")
+    async def identify_submit(
+        background_tasks: BackgroundTasks,
+        username: str = Form(""),
+        password: str = Form(""),
+        file: UploadFile = File(...),
+    ):
+        db_path = app.state.settings["db_path"]
+        user = find_user_by_username(db_path, (username or "").strip())
+        if user is None or not verify_password(password or "", user["password_hash"]):
+            raise HTTPException(status_code=401, detail="用户名或密码不正确")
+        content = await file.read()
+        stored_name = _store_image(
+            app.state.settings,
+            content,
+            file.filename or "",
+            file.content_type or "",
+        )
+        background_tasks.add_task(
+            _recognize_stored_image,
+            app.state.settings,
+            stored_name,
+            user["id"],
+            _now(),
+        )
+        return {"ok": True, "status": "processing"}
+
     @app.post("/api/identify")
     async def identify(file: UploadFile = File(...), authorization: str = Header(default="")):
         user = _require_user(app.state.settings["db_path"], authorization)
@@ -108,6 +137,32 @@ def create_app():
             file.content_type or "",
             user["id"],
         )
+
+    @app.post("/api/energy")
+    def save_energy(body: EnergyBody):
+        username = (body.username or "").strip()
+        password = body.password or ""
+        db_path = app.state.settings["db_path"]
+        user = find_user_by_username(db_path, username)
+        if user is None or not verify_password(password, user["password_hash"]):
+            raise HTTPException(status_code=401, detail="用户名或密码不正确")
+        day = _parse_day(body.date) if body.date else _now()[:10]
+        resting = _energy_number(body.resting_kcal)
+        active = _energy_number(body.active_kcal)
+        return save_energy_day(
+            db_path,
+            user["id"],
+            day,
+            resting,
+            active,
+            _now(),
+        )
+
+    @app.get("/api/energy")
+    def read_energy(date: str = "", authorization: str = Header(default="")):
+        user = _require_user(app.state.settings["db_path"], authorization)
+        day = _parse_day(date) if date else _now()[:10]
+        return get_energy_day(app.state.settings["db_path"], user["id"], day)
 
     @app.get("/api/records")
     def records(
@@ -200,6 +255,14 @@ class AuthBody(BaseModel):
     password: str = ""
 
 
+class EnergyBody(BaseModel):
+    username: str = ""
+    password: str = ""
+    date: str = ""
+    resting_kcal: float = 0
+    active_kcal: float = 0
+
+
 _SHANGHAI = timezone(timedelta(hours=8))
 _DAY_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _MONTH_PATTERN = re.compile(r"^\d{4}-\d{2}$")
@@ -207,6 +270,16 @@ _MONTH_PATTERN = re.compile(r"^\d{4}-\d{2}$")
 
 def _now():
     return datetime.now(_SHANGHAI).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _energy_number(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="热量需要是数字")
+    if number < 0 or number > 20000:
+        raise HTTPException(status_code=400, detail="热量需要在 0 到 20000 之间")
+    return number
 
 
 def _parse_day(value):
@@ -313,7 +386,7 @@ def _retake_sync(settings, content, filename, content_type, user_id, record_id):
     return get_record(settings["db_path"], record_id, user_id)
 
 
-def _save_and_recognize(settings, content, filename, content_type):
+def _store_image(settings, content, filename, content_type):
     if not content:
         raise HTTPException(status_code=400, detail="图片是空的")
     if len(content) > MAX_IMAGE_BYTES:
@@ -321,12 +394,15 @@ def _save_and_recognize(settings, content, filename, content_type):
     extension = _detect_extension(filename, content_type, content)
     if not extension:
         raise HTTPException(status_code=400, detail="请上传 jpg、png、webp、gif 或 heic 图片")
-
     upload_dir = Path(settings["upload_dir"])
     upload_dir.mkdir(parents=True, exist_ok=True)
     stored_name = uuid.uuid4().hex + extension
-    stored_path = upload_dir / stored_name
-    stored_path.write_bytes(content)
+    (upload_dir / stored_name).write_bytes(content)
+    return stored_name
+
+
+def _nutrition_from_file(settings, stored_name):
+    stored_path = Path(settings["upload_dir"]) / stored_name
     try:
         payload = recognize(settings, stored_path)
         nutrition = parse_workflow_payload(payload)
@@ -339,6 +415,33 @@ def _save_and_recognize(settings, content, filename, content_type):
     raw = json.dumps(payload, ensure_ascii=False)
     if len(raw) > 20000:
         raw = raw[:20000]
+    return nutrition, raw
+
+
+def _recognize_stored_image(settings, stored_name, user_id, created_at):
+    try:
+        nutrition, raw = _nutrition_from_file(settings, stored_name)
+    except Exception:
+        return
+    insert_record(
+        settings["db_path"],
+        {
+            "image_path": "/uploads/" + stored_name,
+            "foods": nutrition["foods"],
+            "total_calories_kcal": nutrition["total_calories_kcal"],
+            "summary": nutrition["summary"],
+            "tips": nutrition["tips"],
+            "raw_response": raw,
+            "debug_url": nutrition.get("debug_url") or "",
+            "created_at": created_at,
+            "user_id": user_id,
+        },
+    )
+
+
+def _save_and_recognize(settings, content, filename, content_type):
+    stored_name = _store_image(settings, content, filename, content_type)
+    nutrition, raw = _nutrition_from_file(settings, stored_name)
     return stored_name, nutrition, raw
 
 

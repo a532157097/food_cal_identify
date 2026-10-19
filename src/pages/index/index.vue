@@ -65,6 +65,7 @@
           <text class="macro-value">{{ gramText(todayFat) }}</text>
         </view>
       </view>
+      <text v-if="burnSaved" class="burn-line">今日消耗 {{ kcalText(burnKcal) }} 千卡</text>
     </view>
 
     <text class="section-title">今日记录</text>
@@ -114,6 +115,8 @@ export default {
       todayProtein: 0,
       todayCarb: 0,
       todayFat: 0,
+      burnSaved: false,
+      burnKcal: 0,
       todayItems: [],
       todayLoading: false,
       todayError: '',
@@ -189,6 +192,12 @@ export default {
           this.todayProtein = totals.protein
           this.todayCarb = totals.carb
           this.todayFat = totals.fat
+          return request('/api/energy?date=' + todayText())
+        })
+        .then((body) => {
+          if (!body) return
+          this.burnSaved = !!body.saved
+          this.burnKcal = body.total_kcal || 0
         })
         .catch((err) => {
           if (err && err.statusCode === 401) {
@@ -558,6 +567,13 @@ function pad(value) {
   font-size: 30rpx;
   font-weight: 600;
   color: #1f2329;
+}
+
+.burn-line {
+  display: block;
+  margin-top: 18rpx;
+  font-size: 26rpx;
+  color: #5c6370;
 }
 
 .today-unit {
