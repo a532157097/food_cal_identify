@@ -57,6 +57,53 @@ python -m uvicorn server.main:app --host 0.0.0.0 --port 8000
 
 令牌只放在服务端。不要写进小程序代码。
 
+## Docker 部署
+
+服务器上需要先装好 Docker，并在项目根目录准备好 `server/.env`。构建镜像时不会把这个文件打进去，启动容器时再用 `--env-file` 读它。
+
+在项目根目录执行：
+
+```bash
+docker build -t food-cal-identify:h5 .
+docker run -d \
+  --name food-cal \
+  --restart unless-stopped \
+  -p 8080:8000 \
+  --env-file server/.env \
+  -v food-cal-data:/app/server/data \
+  -v food-cal-uploads:/app/server/uploads \
+  food-cal-identify:h5
+```
+
+浏览器打开 `http://服务器地址:8080`。`-p` 左边的 `8080` 是宿主机端口，容器里的服务仍是 `8000`。宿主机上 8080 已被占用时，只改左边，例如 `-p 38080:8000`。
+
+`food-cal-data` 保存用户和识别记录，`food-cal-uploads` 保存上传的图片。不要删除这两个卷。
+
+## 更新后重新部署
+
+拉到新代码后要重新构建镜像，再换成新容器。只重启原来的容器不会用上新代码，页面也不会更新。
+
+在项目根目录执行：
+
+```bash
+git pull
+docker build -t food-cal-identify:h5 .
+docker stop food-cal
+docker rm food-cal
+docker run -d \
+  --name food-cal \
+  --restart unless-stopped \
+  -p 8080:8000 \
+  --env-file server/.env \
+  -v food-cal-data:/app/server/data \
+  -v food-cal-uploads:/app/server/uploads \
+  food-cal-identify:h5
+```
+
+`docker rm` 只删除容器。上面两个卷还在，账号、记录和图片会保留。不要执行 `docker volume rm food-cal-data` 或 `docker volume rm food-cal-uploads`。
+
+如果上次启动时改过宿主机端口，重新运行时继续用同一个 `-p`。
+
 ## 启动 H5
 
 ```bash
