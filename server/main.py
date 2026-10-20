@@ -1,10 +1,14 @@
 import asyncio
+import io
 import json
 import os
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from PIL import Image
+from pillow_heif import register_heif_opener
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.exceptions import RequestValidationError
@@ -38,6 +42,7 @@ from .parser import parse_workflow_payload
 from .passwords import hash_password, new_token, verify_password
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
+register_heif_opener()
 
 
 def create_app():
@@ -112,43 +117,26 @@ def create_app():
         if user is None or not verify_password(password or "", user["password_hash"]):
             raise HTTPException(status_code=401, detail="用户名或密码不正确")
         content = await file.read()
-        created_at = _now()
-        stored_name = _store_image(
+        return _start_processing(
             app.state.settings,
+            background_tasks,
             content,
             file.filename or "",
             file.content_type or "",
-        )
-        record_id = insert_record(
-            db_path,
-            {
-                "image_path": "/uploads/" + stored_name,
-                "foods": [],
-                "total_calories_kcal": None,
-                "summary": "处理中",
-                "tips": "",
-                "raw_response": "",
-                "debug_url": "",
-                "created_at": created_at,
-                "user_id": user["id"],
-                "status": "processing",
-            },
-        )
-        background_tasks.add_task(
-            _recognize_stored_image,
-            app.state.settings,
-            record_id,
             user["id"],
         )
-        return {"ok": True, "status": "processing", "id": record_id}
 
     @app.post("/api/identify")
-    async def identify(file: UploadFile = File(...), authorization: str = Header(default="")):
+    async def identify(
+        background_tasks: BackgroundTasks,
+        file: UploadFile = File(...),
+        authorization: str = Header(default=""),
+    ):
         user = _require_user(app.state.settings["db_path"], authorization)
         content = await file.read()
-        return await asyncio.to_thread(
-            _identify_sync,
+        return _start_processing(
             app.state.settings,
+            background_tasks,
             content,
             file.filename or "",
             file.content_type or "",
@@ -378,23 +366,30 @@ def _issue_session(db_path, user_id, username):
     return {"token": token, "username": username}
 
 
-def _identify_sync(settings, content, filename, content_type, user_id):
-    stored_name, nutrition, raw = _save_and_recognize(settings, content, filename, content_type)
+def _start_processing(settings, background_tasks, content, filename, content_type, user_id):
+    stored_name = _store_image(settings, content, filename, content_type)
     record_id = insert_record(
         settings["db_path"],
         {
             "image_path": "/uploads/" + stored_name,
-            "foods": nutrition["foods"],
-            "total_calories_kcal": nutrition["total_calories_kcal"],
-            "summary": nutrition["summary"],
-            "tips": nutrition["tips"],
-            "raw_response": raw,
-            "debug_url": nutrition.get("debug_url") or "",
+            "foods": [],
+            "total_calories_kcal": None,
+            "summary": "处理中",
+            "tips": "",
+            "raw_response": "",
+            "debug_url": "",
             "created_at": _now(),
             "user_id": user_id,
+            "status": "processing",
         },
     )
-    return get_record(settings["db_path"], record_id, user_id)
+    background_tasks.add_task(
+        _recognize_stored_image,
+        settings,
+        record_id,
+        user_id,
+    )
+    return {"ok": True, "status": "processing", "id": record_id}
 
 
 def _retake_sync(settings, content, filename, content_type, user_id, record_id):
@@ -431,6 +426,9 @@ def _store_image(settings, content, filename, content_type):
     extension = _detect_extension(filename, content_type, content)
     if not extension:
         raise HTTPException(status_code=400, detail="请上传 jpg、png、webp、gif 或 heic 图片")
+    if extension in (".heic", ".heif"):
+        content = _jpeg_from_heic(content)
+        extension = ".jpg"
     upload_dir = Path(settings["upload_dir"])
     upload_dir.mkdir(parents=True, exist_ok=True)
     stored_name = uuid.uuid4().hex + extension
@@ -519,6 +517,20 @@ def _remove_upload(upload_dir, image_path):
     target = Path(upload_dir) / name
     if target.is_file():
         target.unlink()
+
+
+def _jpeg_from_heic(content):
+    try:
+        image = Image.open(io.BytesIO(content))
+        image = image.convert("RGB")
+        output = io.BytesIO()
+        image.save(output, format="JPEG", quality=85)
+        converted = output.getvalue()
+    except Exception:
+        raise HTTPException(status_code=400, detail="这张苹果照片无法转成可显示的图片")
+    if not converted.startswith(b"\xff\xd8\xff"):
+        raise HTTPException(status_code=400, detail="这张苹果照片无法转成可显示的图片")
+    return converted
 
 
 def _detect_extension(filename, content_type, content):

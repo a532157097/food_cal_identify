@@ -8,7 +8,7 @@
       <view class="total">
         <template v-if="record.status === 'processing' || record.status === 'failed'">
           <text class="total-label">{{ record.status === 'processing' ? '处理中' : '识别失败' }}</text>
-          <text class="summary">{{ record.status === 'processing' ? '正在识别，稍后打开这条记录即可看到结果。' : (record.summary || '识别没有完成') }}</text>
+          <text class="summary">{{ record.status === 'processing' ? '照片已经保存，识别完成后会显示热量。' : (record.summary || '识别没有完成') }}</text>
         </template>
         <template v-else>
           <text class="total-label">这一餐大约</text>
@@ -74,8 +74,10 @@ export default {
   data() {
     return {
       record: null,
+      recordId: '',
       errorText: '',
       reprocessing: false,
+      pollTimer: 0,
     }
   },
   computed: {
@@ -90,15 +92,37 @@ export default {
     },
   },
   onLoad(query) {
-    if (!ensureLogin()) return
     const id = query && query.id
     if (!id) {
       this.errorText = '缺少识别记录'
       return
     }
-    this.load(id)
+    this.recordId = id
+    if (!ensureLogin()) return
+  },
+  onShow() {
+    if (!ensureLogin()) return
+    if (this.recordId) this.load(this.recordId)
+  },
+  onHide() {
+    this.stopPoll()
+  },
+  onUnload() {
+    this.stopPoll()
   },
   methods: {
+    stopPoll() {
+      if (!this.pollTimer) return
+      clearTimeout(this.pollTimer)
+      this.pollTimer = 0
+    },
+    schedulePoll() {
+      this.stopPoll()
+      this.pollTimer = setTimeout(() => {
+        this.pollTimer = 0
+        if (this.recordId) this.load(this.recordId)
+      }, 2000)
+    },
     reprocess() {
       if (!this.record || this.record.status !== 'failed' || this.reprocessing) return
       const id = this.record.id
@@ -116,6 +140,8 @@ export default {
       request('/api/records/' + id)
         .then((body) => {
           this.record = body
+          if (body && body.status === 'processing') this.schedulePoll()
+          else this.stopPoll()
         })
         .catch((err) => {
           if (err && err.statusCode === 401) {

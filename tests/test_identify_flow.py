@@ -499,26 +499,28 @@ def check_api(db_path):
         )
         expect(created.status_code == 200, "识别接口失败: %s" % created.text)
         body = created.json()
-        expect(body["foods"][0]["name"] == "白米饭", "接口没有返回白米饭")
-        expect(body["total_calories_kcal"] == 274, "接口总热量不是 274")
-        expect("模拟" in body["tips"], "模拟结果提示缺失")
-        expect(count_rows(db_path) == before_count + 1, "识别成功后数据库没有新增")
+        expect(body.get("status") == "processing", "页面识别应该立刻返回处理中")
+        expect(body.get("id"), "页面识别没有返回记录编号")
+        expect("foods" not in body and "token" not in body, "页面识别不应该等待识别结果或返回登录令牌")
+        expect(count_rows(db_path) == before_count + 1, "识别提交后数据库没有新增")
 
         row = query_row(db_path, body["id"])
         expect(row is not None, "数据库里找不到这条识别记录")
         expect(row["user_id"] == alice["id"], "记录没有记到当前用户名下")
-        expect(row["total_calories_kcal"] == body["total_calories_kcal"], "接口热量和数据库不一致")
-        expect(row["summary"] == body["summary"], "接口摘要和数据库不一致")
+        expect(row["status"] == "done", "页面识别完成后状态没有变成完成")
+        expect(row["total_calories_kcal"] == 274, "页面识别热量和模拟结果不一致")
         stored_foods = json.loads(row["foods_json"])
-        expect(stored_foods[0]["name"] == body["foods"][0]["name"], "接口食物和数据库不一致")
-        expect(row["image_path"] == body["image_url"], "图片地址和数据库不一致")
+        expect(stored_foods[0]["name"] == "白米饭", "页面识别食物和模拟结果不一致")
+        expect("模拟" in row["tips"], "模拟结果提示缺失")
         image_file = Path(os.environ["FOOD_UPLOAD_DIR"]) / Path(row["image_path"]).name
         expect(image_file.is_file(), "上传图片没有落到磁盘")
 
         detail = client.get("/api/records/%s" % body["id"], headers=headers)
         expect(detail.status_code == 200, "记录详情失败")
         expect(detail.json()["id"] == row["id"], "详情编号和数据库不一致")
+        expect(detail.json()["image_url"] == row["image_path"], "详情图片和数据库不一致")
         expect(detail.json()["foods"][1]["name"] == "清炒西兰花", "详情缺少第二种食物")
+        expect(detail.json()["total_calories_kcal"] == row["total_calories_kcal"], "详情热量和数据库不一致")
 
         listed = client.get("/api/records", params={"limit": 50, "offset": 0}, headers=headers)
         expect(listed.status_code == 200, "记录列表失败")
@@ -802,6 +804,64 @@ def check_api(db_path):
         expect(removed_failed.status_code == 200, "清理失败记录失败")
         expect(not failed_image.exists(), "清理后失败记录的图片还在")
         expect(count_rows(db_path) == rows_before_submit, "清理失败记录后数据库条数没有回到提交前")
+
+        import io
+        from PIL import Image
+        from pillow_heif import register_heif_opener
+
+        register_heif_opener()
+        heif_buf = io.BytesIO()
+        Image.new("RGB", (12, 8), (200, 30, 30)).save(heif_buf, format="HEIF")
+        heic_submit = client.post(
+            "/api/identify/submit",
+            data={"username": "meal_alice", "password": "pass1234"},
+            files={"file": ("meal.heic", heif_buf.getvalue(), "image/heic")},
+        )
+        expect(heic_submit.status_code == 200, "苹果照片提交失败: %s" % heic_submit.text)
+        heic_id = heic_submit.json()["id"]
+        heic_row = query_row(db_path, heic_id)
+        expect(heic_row is not None, "苹果照片没有留下记录")
+        expect(heic_row["image_path"].endswith(".jpg"), "苹果照片没有转成网页能显示的 JPEG")
+        expect(heic_row["user_id"] == alice["id"], "苹果照片没有记到对应用户名下")
+        shown = client.get("/api/records/%s" % heic_id, headers=headers)
+        expect(shown.status_code == 200, "处理记录详情打不开")
+        expect(shown.json()["image_url"] == heic_row["image_path"], "详情里的图片和数据库不一致")
+        image_resp = client.get(heic_row["image_path"])
+        expect(image_resp.status_code == 200, "处理记录的图片文件打不开")
+        expect(image_resp.content[:3] == b"\xff\xd8\xff", "打开的图片不是 JPEG")
+        heic_file = Path(os.environ["FOOD_UPLOAD_DIR"]) / Path(heic_row["image_path"]).name
+        expect(heic_file.read_bytes()[:3] == b"\xff\xd8\xff", "磁盘上的图片和接口不一致")
+        removed_heic = client.delete("/api/records/%s" % heic_id, headers=headers)
+        expect(removed_heic.status_code == 200, "清理苹果照片记录失败")
+        expect(not heic_file.exists(), "清理后苹果照片还在")
+        expect(count_rows(db_path) == rows_before_submit, "清理苹果照片后数据库条数没有回到提交前")
+
+        def fail_page_recognize(settings, image_path):
+            raise CozeError("工作流超时")
+
+        original_page_recognize = server_main.recognize
+        server_main.recognize = fail_page_recognize
+        try:
+            failed_page = client.post(
+                "/api/identify",
+                files={"file": ("meal.png", png, "image/png")},
+                headers=headers,
+            )
+        finally:
+            server_main.recognize = original_page_recognize
+        expect(failed_page.status_code == 200, "页面识别失败时不应该把记录丢掉: %s" % failed_page.text)
+        expect(failed_page.json().get("status") == "processing", "失败的页面识别应该先返回处理中")
+        failed_page_id = failed_page.json()["id"]
+        failed_page_row = query_row(db_path, failed_page_id)
+        expect(failed_page_row["status"] == "failed", "页面识别失败后状态不正确")
+        expect(failed_page_row["summary"] == "工作流超时", "页面识别失败原因没有留在记录里")
+        expect(failed_page_row["total_calories_kcal"] is None, "页面识别失败不应该有热量")
+        failed_page_image = Path(os.environ["FOOD_UPLOAD_DIR"]) / Path(failed_page_row["image_path"]).name
+        expect(failed_page_image.is_file(), "页面识别失败后图片被删掉了")
+        removed_page = client.delete("/api/records/%s" % failed_page_id, headers=headers)
+        expect(removed_page.status_code == 200, "清理页面失败记录失败")
+        expect(not failed_page_image.exists(), "清理后页面失败记录的图片还在")
+        expect(count_rows(db_path) == rows_before_submit, "清理页面失败记录后数据库条数没有回到提交前")
 
         client.post("/api/logout", headers=headers)
         expired = client.get("/api/records", headers=headers)
