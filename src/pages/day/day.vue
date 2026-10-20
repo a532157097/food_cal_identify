@@ -21,8 +21,6 @@
           <text class="macro-value">{{ gramText(fat) }}</text>
         </view>
       </view>
-      <text v-if="burnSaved" class="burn-line">当日消耗 {{ kcalText(burnKcal) }} 千卡 <text v-if="burnSyncedAt" class="burn-time">{{ burnSyncedAt }}</text></text>
-      <text v-if="burnSaved" class="burn-line gap-line">热量缺口 <text :class="gapClass()">{{ kcalText(gapKcal()) }}</text> 千卡</text>
     </view>
 
     <view v-if="!loading && items.length === 0" class="empty">
@@ -65,9 +63,6 @@ export default {
       protein: 0,
       carb: 0,
       fat: 0,
-      burnSaved: false,
-      burnKcal: 0,
-      burnSyncedAt: '',
       loading: false,
       errorText: '',
       retakingId: 0,
@@ -100,13 +95,6 @@ export default {
           this.protein = totals.protein
           this.carb = totals.carb
           this.fat = totals.fat
-          return request('/api/energy?date=' + this.date)
-        })
-        .then((body) => {
-          if (!body) return
-          this.burnSaved = !!body.saved
-          this.burnKcal = body.total_kcal || 0
-          this.burnSyncedAt = body && body.saved && body.updated_at ? String(body.updated_at).slice(11, 16) : ''
         })
         .catch((err) => {
           if (err && err.statusCode === 401) {
@@ -127,14 +115,6 @@ export default {
     },
     gramText(value) {
       return formatGram(value)
-    },
-    gapKcal() {
-      const burn = Number(this.burnKcal) || 0
-      const intake = Number(this.totalKcal) || 0
-      return Math.round((burn - intake) * 10) / 10
-    },
-    gapClass() {
-      return this.gapKcal() < 0 ? 'gap-over' : 'gap-ok'
     },
     imageOf(item) {
       return resolveUrl(item.image_url)
@@ -330,30 +310,6 @@ function sumNutrition(items) {
   font-size: 30rpx;
   font-weight: 600;
   color: #1f2329;
-}
-
-.burn-line {
-  display: block;
-  margin-top: 18rpx;
-  font-size: 26rpx;
-  color: #5c6370;
-}
-
-.burn-time {
-  margin-left: 12rpx;
-  color: #a8adb5;
-}
-
-.gap-line {
-  margin-top: 8rpx;
-}
-
-.gap-ok {
-  color: #00c48c;
-}
-
-.gap-over {
-  color: #ff5c5c;
 }
 
 .empty {

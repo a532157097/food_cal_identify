@@ -65,8 +65,6 @@
           <text class="macro-value">{{ gramText(todayFat) }}</text>
         </view>
       </view>
-      <text v-if="burnSaved" class="burn-line">今日消耗 {{ kcalText(burnKcal) }} 千卡 <text v-if="burnSyncedAt" class="burn-time">{{ burnSyncedAt }}</text></text>
-      <text v-if="burnSaved" class="burn-line gap-line">热量缺口 <text :class="gapClass()">{{ kcalText(gapKcal()) }}</text> 千卡</text>
     </view>
 
     <text class="section-title">今日记录</text>
@@ -117,9 +115,6 @@ export default {
       todayProtein: 0,
       todayCarb: 0,
       todayFat: 0,
-      burnSaved: false,
-      burnKcal: 0,
-      burnSyncedAt: '',
       todayItems: [],
       todayLoading: false,
       todayError: '',
@@ -196,13 +191,6 @@ export default {
           this.todayProtein = totals.protein
           this.todayCarb = totals.carb
           this.todayFat = totals.fat
-          return request('/api/energy?date=' + todayText())
-        })
-        .then((body) => {
-          if (!body) return
-          this.burnSaved = !!body.saved
-          this.burnKcal = body.total_kcal || 0
-          this.burnSyncedAt = body && body.saved && body.updated_at ? String(body.updated_at).slice(11, 16) : ''
         })
         .catch((err) => {
           if (err && err.statusCode === 401) {
@@ -220,14 +208,6 @@ export default {
     },
     kcalText(value) {
       return formatKcal(value)
-    },
-    gapKcal() {
-      const burn = Number(this.burnKcal) || 0
-      const intake = Number(this.todayKcal) || 0
-      return Math.round((burn - intake) * 10) / 10
-    },
-    gapClass() {
-      return this.gapKcal() < 0 ? 'gap-over' : 'gap-ok'
     },
     gramText(value) {
       return formatGram(value)
@@ -607,30 +587,6 @@ function pad(value) {
   font-size: 30rpx;
   font-weight: 600;
   color: #1f2329;
-}
-
-.burn-line {
-  display: block;
-  margin-top: 18rpx;
-  font-size: 26rpx;
-  color: #5c6370;
-}
-
-.burn-time {
-  margin-left: 12rpx;
-  color: #a8adb5;
-}
-
-.gap-line {
-  margin-top: 8rpx;
-}
-
-.gap-ok {
-  color: #00c48c;
-}
-
-.gap-over {
-  color: #ff5c5c;
 }
 
 .today-unit {

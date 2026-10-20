@@ -28,15 +28,6 @@ CREATE TABLE IF NOT EXISTS auth_session (
     user_id INTEGER NOT NULL,
     created_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS energy_daily (
-    user_id INTEGER NOT NULL,
-    day TEXT NOT NULL,
-    resting_kcal REAL NOT NULL,
-    active_kcal REAL NOT NULL,
-    total_kcal REAL NOT NULL,
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (user_id, day)
-);
 """
 
 
@@ -60,6 +51,7 @@ def init_db(db_path):
                 "ALTER TABLE identify_record ADD COLUMN status TEXT NOT NULL DEFAULT 'done'"
             )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_identify_user ON identify_record(user_id)")
+        conn.execute("DROP TABLE IF EXISTS energy_daily")
         conn.commit()
     finally:
         conn.close()
@@ -182,28 +174,14 @@ def calendar_month(db_path, user_id, month):
         by_day = {}
         for row in rows:
             by_day[row["day"]] = row
-        energy_rows = conn.execute(
-            """
-            SELECT day, total_kcal
-            FROM energy_daily
-            WHERE user_id = ? AND day >= ? AND day < ?
-            """,
-            (user_id, start[:10], end[:10]),
-        ).fetchall()
-        energy_by_day = {}
-        for row in energy_rows:
-            energy_by_day[row["day"]] = row["total_kcal"]
         days = []
         for day_number in range(1, last_day + 1):
             key = "%04d-%02d-%02d" % (year, mon, day_number)
             row = by_day.get(key)
-            burn = energy_by_day.get(key)
             days.append({
                 "date": key,
                 "total_calories_kcal": round(float(row["kcal"]), 2) if row else 0,
                 "count": int(row["c"]) if row else 0,
-                "burn_kcal": round(float(burn), 2) if burn is not None else None,
-                "burn_saved": key in energy_by_day,
             })
         return {"month": "%04d-%02d" % (year, mon), "days": days}
     finally:
@@ -374,70 +352,6 @@ def delete_record(db_path, record_id, user_id):
         )
         conn.commit()
         return row["image_path"]
-    finally:
-        conn.close()
-
-
-def save_energy_day(db_path, user_id, day, resting_kcal, active_kcal, updated_at):
-    total = round(float(resting_kcal) + float(active_kcal), 2)
-    resting = round(float(resting_kcal), 2)
-    active = round(float(active_kcal), 2)
-    conn = connect(db_path)
-    try:
-        conn.execute(
-            """
-            INSERT INTO energy_daily (
-                user_id, day, resting_kcal, active_kcal, total_kcal, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(user_id, day) DO UPDATE SET
-                resting_kcal = excluded.resting_kcal,
-                active_kcal = excluded.active_kcal,
-                total_kcal = excluded.total_kcal,
-                updated_at = excluded.updated_at
-            """,
-            (user_id, day, resting, active, total, updated_at),
-        )
-        conn.commit()
-        return {
-            "date": day,
-            "resting_kcal": resting,
-            "active_kcal": active,
-            "total_kcal": total,
-            "saved": True,
-            "updated_at": updated_at,
-        }
-    finally:
-        conn.close()
-
-
-def get_energy_day(db_path, user_id, day):
-    conn = connect(db_path)
-    try:
-        row = conn.execute(
-            """
-            SELECT day, resting_kcal, active_kcal, total_kcal, updated_at
-            FROM energy_daily
-            WHERE user_id = ? AND day = ?
-            """,
-            (user_id, day),
-        ).fetchone()
-        if row is None:
-            return {
-                "date": day,
-                "resting_kcal": 0,
-                "active_kcal": 0,
-                "total_kcal": 0,
-                "saved": False,
-                "updated_at": None,
-            }
-        return {
-            "date": row["day"],
-            "resting_kcal": row["resting_kcal"],
-            "active_kcal": row["active_kcal"],
-            "total_kcal": row["total_kcal"],
-            "saved": True,
-            "updated_at": row["updated_at"],
-        }
     finally:
         conn.close()
 

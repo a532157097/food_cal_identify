@@ -28,7 +28,6 @@ from .db import (
     find_user_by_username,
     calendar_month,
     complete_identify_record,
-    get_energy_day,
     reopen_failed_record,
     reopen_record_for_estimate,
     get_record,
@@ -37,7 +36,6 @@ from .db import (
     list_records,
     list_records_on_day,
     replace_record,
-    save_energy_day,
 )
 from .parser import parse_workflow_payload
 from .passwords import hash_password, new_token, verify_password
@@ -143,32 +141,6 @@ def create_app():
             file.content_type or "",
             user["id"],
         )
-
-    @app.post("/api/energy")
-    def save_energy(body: EnergyBody):
-        username = (body.username or "").strip()
-        password = body.password or ""
-        db_path = app.state.settings["db_path"]
-        user = find_user_by_username(db_path, username)
-        if user is None or not verify_password(password, user["password_hash"]):
-            raise HTTPException(status_code=401, detail="用户名或密码不正确")
-        day = _parse_day(body.date) if body.date else _now()[:10]
-        resting = _energy_number(body.resting_kcal)
-        active = _energy_number(body.active_kcal)
-        return save_energy_day(
-            db_path,
-            user["id"],
-            day,
-            resting,
-            active,
-            _now(),
-        )
-
-    @app.get("/api/energy")
-    def read_energy(date: str = "", authorization: str = Header(default="")):
-        user = _require_user(app.state.settings["db_path"], authorization)
-        day = _parse_day(date) if date else _now()[:10]
-        return get_energy_day(app.state.settings["db_path"], user["id"], day)
 
     @app.get("/api/records")
     def records(
@@ -301,14 +273,6 @@ class AuthBody(BaseModel):
     password: str = ""
 
 
-class EnergyBody(BaseModel):
-    username: str = ""
-    password: str = ""
-    date: str = ""
-    resting_kcal: float = 0
-    active_kcal: float = 0
-
-
 _SHANGHAI = timezone(timedelta(hours=8))
 _DAY_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _MONTH_PATTERN = re.compile(r"^\d{4}-\d{2}$")
@@ -316,16 +280,6 @@ _MONTH_PATTERN = re.compile(r"^\d{4}-\d{2}$")
 
 def _now():
     return datetime.now(_SHANGHAI).strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _energy_number(value):
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="热量需要是数字")
-    if number < 0 or number > 20000:
-        raise HTTPException(status_code=400, detail="热量需要在 0 到 20000 之间")
-    return number
 
 
 def _parse_day(value):

@@ -43,22 +43,6 @@ def query_row(db_path, record_id):
         connection.close()
 
 
-def query_energy(db_path, user_id, day):
-    connection = sqlite3.connect(str(db_path))
-    connection.row_factory = sqlite3.Row
-    try:
-        return connection.execute(
-            """
-            SELECT resting_kcal, active_kcal, total_kcal, updated_at
-            FROM energy_daily
-            WHERE user_id = ? AND day = ?
-            """,
-            (user_id, day),
-        ).fetchone()
-    finally:
-        connection.close()
-
-
 def count_uploads():
     upload_dir = Path(os.environ["FOOD_UPLOAD_DIR"])
     if not upload_dir.exists():
@@ -70,17 +54,6 @@ def count_sessions(db_path):
     connection = sqlite3.connect(str(db_path))
     try:
         return connection.execute("SELECT COUNT(*) FROM auth_session").fetchone()[0]
-    finally:
-        connection.close()
-
-
-def count_energy(db_path, user_id, day):
-    connection = sqlite3.connect(str(db_path))
-    try:
-        return connection.execute(
-            "SELECT COUNT(*) FROM energy_daily WHERE user_id = ? AND day = ?",
-            (user_id, day),
-        ).fetchone()[0]
     finally:
         connection.close()
 
@@ -121,18 +94,6 @@ def set_created_at(db_path, record_id, created_at):
         connection.execute(
             "UPDATE identify_record SET created_at = ? WHERE id = ?",
             (created_at, record_id),
-        )
-        connection.commit()
-    finally:
-        connection.close()
-
-
-def delete_energy(db_path, user_id, day):
-    connection = sqlite3.connect(str(db_path))
-    try:
-        connection.execute(
-            "DELETE FROM energy_daily WHERE user_id = ? AND day = ?",
-            (user_id, day),
         )
         connection.commit()
     finally:
@@ -349,6 +310,22 @@ def check_legacy_database():
             "INSERT INTO identify_record (image_path, foods_json, created_at) VALUES (?, ?, ?)",
             ("/uploads/old.png", "[]", "2026-01-01 00:00:00"),
         )
+        connection.execute(
+            """
+            CREATE TABLE energy_daily (
+                user_id INTEGER NOT NULL,
+                day TEXT NOT NULL,
+                resting_kcal REAL NOT NULL,
+                active_kcal REAL NOT NULL,
+                total_kcal REAL NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, day)
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO energy_daily (user_id, day, resting_kcal, active_kcal, total_kcal, updated_at) VALUES (1, '2026-01-01', 1, 1, 2, '2026-01-01 00:00:00')"
+        )
         connection.commit()
         connection.close()
         connection = None
@@ -359,12 +336,16 @@ def check_legacy_database():
         columns = [row[1] for row in connection.execute("PRAGMA table_info(identify_record)")]
         kept = connection.execute("SELECT COUNT(*) FROM identify_record").fetchone()[0]
         old_status = connection.execute("SELECT status FROM identify_record").fetchone()[0]
+        energy_left = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'energy_daily'"
+        ).fetchone()
         connection.close()
         connection = None
         expect("user_id" in columns, "旧数据库没有补上 user_id")
         expect("status" in columns, "旧数据库没有补上 status")
         expect(old_status == "done", "旧记录的状态不是已完成")
         expect(kept == 1, "迁移把旧记录删掉了")
+        expect(energy_left is None, "旧库里的消耗表没有删掉")
         listed = list_records(str(legacy), 1, 20, 0)
         expect(listed["total"] == 0, "没有主人的旧记录出现在用户列表里")
         print("旧库迁移通过")
@@ -396,8 +377,6 @@ def check_api(db_path):
         expect(guest_calendar.status_code == 401, "未登录不应该能看月历")
         guest_day = client.get("/api/records", params={"date": "2026-10-16"})
         expect(guest_day.status_code == 401, "未登录不应该能按日期查记录")
-        guest_energy = client.post("/api/energy", json={"resting_kcal": 1, "active_kcal": 1})
-        expect(guest_energy.status_code == 401, "未登录不应该能写入消耗")
         guest = client.post("/api/identify", files={"file": ("meal.png", png, "image/png")})
         expect(guest.status_code == 401, "未登录不应该能上传")
         expect(count_rows(db_path) == before_count, "未登录上传后数据库条数变了")
@@ -417,69 +396,27 @@ def check_api(db_path):
         logged_in = client.post("/api/login", json={"username": "meal_alice", "password": "pass1234"})
         expect(logged_in.status_code == 200, "正确密码登录失败")
         headers = {"Authorization": "Bearer " + logged_in.json()["token"]}
-        empty_energy = client.get("/api/energy", params={"date": "2026-10-16"}, headers=headers)
-        expect(empty_energy.status_code == 200, "读取空消耗失败")
-        expect(empty_energy.json()["saved"] is False, "没有写入时不应该显示已保存")
-        expect(empty_energy.json()["updated_at"] is None, "没有同步时不应该有同步时间")
-        sessions_before = count_sessions(db_path)
-        wrong_energy = client.post(
+        removed_energy = client.post(
             "/api/energy",
             json={
                 "username": "meal_alice",
-                "password": "wrong123",
+                "password": "pass1234",
                 "date": "2026-10-16",
                 "resting_kcal": 1,
                 "active_kcal": 1,
             },
         )
-        expect(wrong_energy.status_code == 401, "密码错误不应该能写入消耗")
-        expect(query_energy(db_path, alice["id"], "2026-10-16") is None, "密码错误时不应该写入消耗")
-        saved_energy = client.post(
-            "/api/energy",
-            json={
-                "username": "meal_alice",
-                "password": "pass1234",
-                "date": "2026-10-16",
-                "resting_kcal": 1400.2,
-                "active_kcal": 320.3,
-            },
-        )
-        expect(saved_energy.status_code == 200, "写入消耗失败: %s" % saved_energy.text)
-        expect(saved_energy.json()["total_kcal"] == 1720.5, "消耗合计不正确")
-        expect(saved_energy.json().get("updated_at"), "写入消耗没有返回同步时间")
-        expect(query_energy(db_path, alice["id"], "2026-10-16")["updated_at"] == saved_energy.json()["updated_at"], "写入返回的同步时间和数据库不一致")
-        expect(count_sessions(db_path) == sessions_before, "同步消耗不应该新建登录")
-        updated_energy = client.post(
-            "/api/energy",
-            json={
-                "username": "meal_alice",
-                "password": "pass1234",
-                "date": "2026-10-16",
-                "resting_kcal": 1500,
-                "active_kcal": 400,
-            },
-        )
-        expect(updated_energy.status_code == 200, "同一天再次写入失败")
-        expect(updated_energy.json()["total_kcal"] == 1900, "同一天应该覆盖而不是累加")
-        stored_energy = query_energy(db_path, alice["id"], "2026-10-16")
-        expect(stored_energy is not None and stored_energy["total_kcal"] == 1900, "数据库里的消耗和接口不一致")
-        expect(updated_energy.json()["updated_at"] == stored_energy["updated_at"], "再次同步后的时间和数据库不一致")
-        read_energy = client.get("/api/energy", params={"date": "2026-10-16"}, headers=headers)
-        expect(read_energy.status_code == 200, "读取已同步消耗失败")
-        expect(read_energy.json()["updated_at"] == stored_energy["updated_at"], "读取到的同步时间和数据库不一致")
-        expect(count_energy(db_path, alice["id"], "2026-10-16") == 1, "同一天不应该有两条消耗")
-        bad_energy = client.post(
-            "/api/energy",
-            json={
-                "username": "meal_alice",
-                "password": "pass1234",
-                "date": "2026-10-16",
-                "resting_kcal": -1,
-                "active_kcal": 1,
-            },
-        )
-        expect(bad_energy.status_code == 400, "负数消耗应该被拒绝")
-        expect(query_energy(db_path, alice["id"], "2026-10-16")["total_kcal"] == 1900, "非法写入改掉了原数据")
+        expect(removed_energy.status_code == 404, "消耗写入接口应该已经去掉")
+        removed_energy_read = client.get("/api/energy", params={"date": "2026-10-16"}, headers=headers)
+        expect(removed_energy_read.status_code == 404, "消耗读取接口应该已经去掉")
+        energy_conn = sqlite3.connect(str(db_path))
+        try:
+            energy_table = energy_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'energy_daily'"
+            ).fetchone()
+        finally:
+            energy_conn.close()
+        expect(energy_table is None, "数据库里还留着消耗表")
 
         empty = client.post(
             "/api/identify",
@@ -578,22 +515,6 @@ def check_api(db_path):
         finally:
             restore_conn.close()
         expect(query_row(db_path, body["id"])["status"] == "done", "估算测试没有把记录恢复成已完成")
-        bob_energy = client.get("/api/energy", params={"date": "2026-10-16"}, headers=bob_headers)
-        expect(bob_energy.status_code == 200 and bob_energy.json()["saved"] is False, "别人的消耗不应该被看到")
-        bob_write = client.post(
-            "/api/energy",
-            json={
-                "username": "meal_bob",
-                "password": "pass5678",
-                "date": "2026-10-16",
-                "resting_kcal": 10,
-                "active_kcal": 10,
-            },
-        )
-        expect(bob_write.status_code == 200, "第二个用户写入消耗失败")
-        expect(query_energy(db_path, alice["id"], "2026-10-16")["total_kcal"] == 1900, "别人的同步改掉了原用户消耗")
-        bob_user = query_user(db_path, "meal_bob")
-        expect(query_energy(db_path, bob_user["id"], "2026-10-16")["total_kcal"] == 20, "消耗没有记到对应用户名下")
         bob_list = client.get("/api/records", headers=bob_headers)
         expect(bob_list.json()["total"] == 0, "其他用户看到了别人的记录")
         bob_detail = client.get("/api/records/%s" % body["id"], headers=bob_headers)
@@ -676,41 +597,11 @@ def check_api(db_path):
             days = calendar.json()["days"]
             expect(len(days) == calendar_mod.monthrange(now.year, now.month)[1], "月历天数不对")
             sql_days = day_sums(db_path, alice["id"], month)
-            saw_missing_burn = False
             for item in days:
                 sql_value = sql_days.get(item["date"], (0.0, 0))
                 expect(item["total_calories_kcal"] == sql_value[0], "月历 %s 热量和数据库不一致" % item["date"])
                 expect(item["count"] == sql_value[1], "月历 %s 条数和数据库不一致" % item["date"])
-                stored_burn = query_energy(db_path, alice["id"], item["date"])
-                if stored_burn is None:
-                    expect(item["burn_saved"] is False, "没有消耗的日期不应该标记已同步")
-                    expect(item["burn_kcal"] is None, "没有消耗的日期不应该带消耗数值")
-                    saw_missing_burn = True
-                else:
-                    expect(item["burn_saved"] is True, "已同步消耗的日期没有标记")
-                    expect(item["burn_kcal"] == stored_burn["total_kcal"], "月历 %s 消耗和数据库不一致" % item["date"])
-            expect(saw_missing_burn, "这个月每天都有消耗，没法核对空缺口")
-            gap_energy = client.post(
-                "/api/energy",
-                json={
-                    "username": "meal_alice",
-                    "password": "pass1234",
-                    "date": other_day,
-                    "resting_kcal": 1500,
-                    "active_kcal": 200,
-                },
-            )
-            expect(gap_energy.status_code == 200, "为月历写入消耗失败: %s" % gap_energy.text)
-            try:
-                refreshed = client.get("/api/calendar", params={"month": month}, headers=headers)
-                gap_day = next(item for item in refreshed.json()["days"] if item["date"] == other_day)
-                expect(gap_day["total_calories_kcal"] == 2000, "写入消耗后当天摄入变了")
-                expect(gap_day["burn_saved"] is True, "写入消耗后月历没有标记已同步")
-                expect(gap_day["burn_kcal"] == query_energy(db_path, alice["id"], other_day)["total_kcal"], "月历消耗和数据库不一致")
-                expect(gap_day["burn_kcal"] == 1700, "月历消耗不是 1700")
-            finally:
-                delete_energy(db_path, alice["id"], other_day)
-                expect(query_energy(db_path, alice["id"], other_day) is None, "月历测试写入的消耗没有删掉")
+                expect("burn_kcal" not in item and "burn_saved" not in item, "月历还带着消耗字段")
             exact = client.get("/api/records", params={"date": other_day}, headers=headers)
             expect(exact.json()["total_calories_kcal"] == 2000, "2000 千卡的日期汇总不正确")
 
@@ -736,16 +627,6 @@ def check_api(db_path):
             expect(bob_day.json()["total"] == 0, "其他用户看到了别人当天的记录")
             bob_calendar = client.get("/api/calendar", params={"month": month}, headers=bob_headers)
             expect(all(item["count"] == 0 for item in bob_calendar.json()["days"]), "其他用户的月历出现了别人的热量")
-            bob_user = query_user(db_path, "meal_bob")
-            for item in bob_calendar.json()["days"]:
-                stored_burn = query_energy(db_path, bob_user["id"], item["date"])
-                if stored_burn is None:
-                    expect(item["burn_saved"] is False, "其他用户看到了别人的消耗")
-                else:
-                    expect(item["burn_kcal"] == stored_burn["total_kcal"], "其他用户月历消耗和自己的数据库不一致")
-                    alice_burn = query_energy(db_path, alice["id"], item["date"])
-                    if alice_burn is not None:
-                        expect(item["burn_kcal"] != alice_burn["total_kcal"], "其他用户月历显示了别人的消耗")
             expect(day_sums(db_path, query_user(db_path, "meal_bob")["id"], month) == {}, "数据库里第二个用户不该有记录")
         finally:
             delete_ids(db_path, extra_ids)
