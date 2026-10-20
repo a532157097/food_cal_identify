@@ -7,7 +7,7 @@
         <text class="brand">{{ title }}</text>
         <text class="switch" :class="{ disabled: !canNext }" @tap="shift(1)">下个月</text>
       </view>
-      <text class="tagline">超过 2000 千卡为红色，不超过为绿色。最多回看一年</text>
+      <text class="tagline">上方是摄入，超过 2000 千卡为红色。下方是热量缺口，没有消耗时为 -。最多回看一年</text>
     </view>
 
     <view v-if="errorText" class="banner">{{ errorText }}</view>
@@ -19,8 +19,9 @@
       <view class="grid">
         <view v-for="(cell, index) in cells" :key="index" class="cell-wrap">
           <view v-if="cell" class="cell" hover-class="pressed" @tap="open(cell)">
-            <text class="day">{{ cell.day }}</text>
             <text class="kcal" :class="levelOf(cell.total_calories_kcal)">{{ kcalText(cell.total_calories_kcal) }}</text>
+            <text class="day">{{ cell.day }}</text>
+            <text class="gap" :class="gapClass(cell)">{{ gapText(cell) }}</text>
           </view>
         </view>
       </view>
@@ -95,6 +96,18 @@ export default {
     kcalText(value) {
       return formatKcal(value)
     },
+    gapText(cell) {
+      if (!cell.burn_saved) return '-'
+      const burn = Number(cell.burn_kcal) || 0
+      const intake = Number(cell.total_calories_kcal) || 0
+      return formatKcal(Math.round((burn - intake) * 10) / 10)
+    },
+    gapClass(cell) {
+      if (!cell.burn_saved) return ''
+      const burn = Number(cell.burn_kcal) || 0
+      const intake = Number(cell.total_calories_kcal) || 0
+      return burn - intake < 0 ? 'over' : 'ok'
+    },
     open(cell) {
       uni.navigateTo({ url: '/pages/day/day?date=' + cell.date })
     },
@@ -114,6 +127,8 @@ function buildCells(days) {
       date: item.date,
       day: Number(item.date.slice(8)),
       total_calories_kcal: item.total_calories_kcal || 0,
+      burn_saved: !!item.burn_saved,
+      burn_kcal: item.burn_saved ? Number(item.burn_kcal) || 0 : 0,
     })
   })
   return cells
@@ -248,6 +263,7 @@ function pad(value) {
 
 .day {
   display: block;
+  margin-top: 2rpx;
   font-size: 26rpx;
   font-weight: 600;
   color: #1f2329;
@@ -255,7 +271,6 @@ function pad(value) {
 
 .kcal {
   display: block;
-  margin-top: 4rpx;
   font-size: 18rpx;
   font-weight: 600;
 }
@@ -264,8 +279,21 @@ function pad(value) {
   color: #00c48c;
 }
 
-.kcal.over {
+.kcal.over,
+.gap.over {
   color: #ff5c5c;
+}
+
+.gap {
+  display: block;
+  margin-top: 2rpx;
+  font-size: 18rpx;
+  font-weight: 600;
+  color: #a8adb5;
+}
+
+.gap.ok {
+  color: #00c48c;
 }
 
 .nav-spacer {

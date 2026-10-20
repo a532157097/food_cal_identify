@@ -16,11 +16,12 @@
     >
       <image class="thumb" :src="imageOf(item)" mode="aspectFill"></image>
       <view class="meta">
-        <text class="names">{{ namesOf(item) }}</text>
-        <text class="kcal">{{ kcalText(item.total_calories_kcal) }} 千卡</text>
+        <text class="names">{{ titleOf(item) }}</text>
+        <text class="kcal" :class="lineClass(item)">{{ lineOf(item) }}</text>
         <text class="time">{{ item.created_at }}</text>
       </view>
       <view class="ops" @tap.stop>
+        <text v-if="item.status === 'failed'" class="op" @tap="reprocess(item)">{{ reprocessingId === item.id ? '处理中' : '重新处理' }}</text>
         <text class="op" @tap="retake(item)">{{ retakingId === item.id ? '重拍中' : '重拍' }}</text>
         <text class="op op-delete" @tap="remove(item)">删除</text>
       </view>
@@ -29,7 +30,7 @@
 </template>
 
 <script>
-import { ensureLogin, request, resolveUrl, uploadRetake } from '../../utils/api.js'
+import { ensureLogin, reprocessRecord, request, resolveUrl, uploadRetake } from '../../utils/api.js'
 import { compressPhoto } from '../../utils/image.js'
 import { calorieLevel, foodNames, formatKcal } from '../../utils/format.js'
 
@@ -42,6 +43,7 @@ export default {
       loading: false,
       errorText: '',
       retakingId: 0,
+      reprocessingId: 0,
     }
   },
   onLoad(query) {
@@ -90,8 +92,35 @@ export default {
     namesOf(item) {
       return foodNames(item.foods)
     },
+    titleOf(item) {
+      if (item.status === 'processing') return '处理中'
+      if (item.status === 'failed') return '识别失败'
+      return foodNames(item.foods)
+    },
+    lineOf(item) {
+      if (item.status === 'processing') return '正在识别'
+      if (item.status === 'failed') return item.summary || '识别没有完成'
+      return this.kcalText(item.total_calories_kcal) + ' 千卡'
+    },
+    lineClass(item) {
+      if (item.status === 'processing') return 'pending'
+      if (item.status === 'failed') return 'failed'
+      return ''
+    },
     open(item) {
       uni.navigateTo({ url: '/pages/result/result?id=' + item.id })
+    },
+    reprocess(item) {
+      if (!item || item.status !== 'failed' || this.reprocessingId) return
+      this.reprocessingId = item.id
+      reprocessRecord(item.id)
+        .then(() => this.load())
+        .catch((err) => {
+          uni.showToast({ title: (err && err.message) || '重新处理失败', icon: 'none' })
+        })
+        .then(() => {
+          this.reprocessingId = 0
+        })
     },
     retake(item) {
       if (this.retakingId) return
@@ -235,6 +264,16 @@ export default {
   font-size: 28rpx;
   color: #1f2329;
   font-weight: 600;
+}
+
+.pending {
+  color: #8b919a;
+  font-weight: 500;
+}
+
+.failed {
+  color: #ff5c5c;
+  font-weight: 500;
 }
 
 .time {

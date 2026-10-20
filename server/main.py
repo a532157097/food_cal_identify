@@ -23,7 +23,9 @@ from .db import (
     find_user_by_token,
     find_user_by_username,
     calendar_month,
+    complete_identify_record,
     get_energy_day,
+    reopen_failed_record,
     get_record,
     init_db,
     insert_record,
@@ -110,20 +112,35 @@ def create_app():
         if user is None or not verify_password(password or "", user["password_hash"]):
             raise HTTPException(status_code=401, detail="用户名或密码不正确")
         content = await file.read()
+        created_at = _now()
         stored_name = _store_image(
             app.state.settings,
             content,
             file.filename or "",
             file.content_type or "",
         )
+        record_id = insert_record(
+            db_path,
+            {
+                "image_path": "/uploads/" + stored_name,
+                "foods": [],
+                "total_calories_kcal": None,
+                "summary": "处理中",
+                "tips": "",
+                "raw_response": "",
+                "debug_url": "",
+                "created_at": created_at,
+                "user_id": user["id"],
+                "status": "processing",
+            },
+        )
         background_tasks.add_task(
             _recognize_stored_image,
             app.state.settings,
-            stored_name,
+            record_id,
             user["id"],
-            _now(),
         )
-        return {"ok": True, "status": "processing"}
+        return {"ok": True, "status": "processing", "id": record_id}
 
     @app.post("/api/identify")
     async def identify(file: UploadFile = File(...), authorization: str = Header(default="")):
@@ -192,6 +209,26 @@ def create_app():
             user["id"],
             _parse_month(month),
         )
+
+    @app.post("/api/records/{record_id}/reprocess")
+    def reprocess_record(
+        record_id: int,
+        background_tasks: BackgroundTasks,
+        authorization: str = Header(default=""),
+    ):
+        user = _require_user(app.state.settings["db_path"], authorization)
+        opened = reopen_failed_record(app.state.settings["db_path"], record_id, user["id"])
+        if opened is None:
+            raise HTTPException(status_code=404, detail="记录不存在")
+        if opened is False:
+            raise HTTPException(status_code=400, detail="只有识别失败的记录可以重新处理")
+        background_tasks.add_task(
+            _recognize_stored_image,
+            app.state.settings,
+            record_id,
+            user["id"],
+        )
+        return {"ok": True, "status": "processing", "id": record_id}
 
     @app.get("/api/records/{record_id}")
     def record_detail(record_id: int, authorization: str = Header(default="")):
@@ -401,40 +438,70 @@ def _store_image(settings, content, filename, content_type):
     return stored_name
 
 
-def _nutrition_from_file(settings, stored_name):
+def _read_nutrition(settings, stored_name):
     stored_path = Path(settings["upload_dir"]) / stored_name
-    try:
-        payload = recognize(settings, stored_path)
-        nutrition = parse_workflow_payload(payload)
-    except (CozeError, ValueError) as exc:
-        stored_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=502, detail=str(exc))
-    except Exception:
-        stored_path.unlink(missing_ok=True)
-        raise
+    payload = recognize(settings, stored_path)
+    nutrition = parse_workflow_payload(payload)
     raw = json.dumps(payload, ensure_ascii=False)
     if len(raw) > 20000:
         raw = raw[:20000]
     return nutrition, raw
 
 
-def _recognize_stored_image(settings, stored_name, user_id, created_at):
+def _nutrition_from_file(settings, stored_name):
     try:
-        nutrition, raw = _nutrition_from_file(settings, stored_name)
+        return _read_nutrition(settings, stored_name)
+    except (CozeError, ValueError) as exc:
+        _remove_upload(settings["upload_dir"], "/uploads/" + stored_name)
+        raise HTTPException(status_code=502, detail=str(exc))
     except Exception:
+        _remove_upload(settings["upload_dir"], "/uploads/" + stored_name)
+        raise
+
+
+def _failure_text(exc):
+    if isinstance(exc, HTTPException) and isinstance(exc.detail, str) and exc.detail.strip():
+        return exc.detail.strip()[:80]
+    if isinstance(exc, (CozeError, ValueError)) and str(exc).strip():
+        return str(exc).strip()[:80]
+    return "识别失败"
+
+
+def _recognize_stored_image(settings, record_id, user_id):
+    row = get_record(settings["db_path"], record_id, user_id)
+    if row is None or row.get("status") != "processing":
         return
-    insert_record(
+    stored_name = Path(row["image_url"]).name
+    try:
+        nutrition, raw = _read_nutrition(settings, stored_name)
+    except Exception as exc:
+        complete_identify_record(
+            settings["db_path"],
+            record_id,
+            user_id,
+            {
+                "foods": [],
+                "total_calories_kcal": None,
+                "summary": _failure_text(exc),
+                "tips": "",
+                "raw_response": "",
+                "debug_url": "",
+                "status": "failed",
+            },
+        )
+        return
+    complete_identify_record(
         settings["db_path"],
+        record_id,
+        user_id,
         {
-            "image_path": "/uploads/" + stored_name,
             "foods": nutrition["foods"],
             "total_calories_kcal": nutrition["total_calories_kcal"],
             "summary": nutrition["summary"],
             "tips": nutrition["tips"],
             "raw_response": raw,
             "debug_url": nutrition.get("debug_url") or "",
-            "created_at": created_at,
-            "user_id": user_id,
+            "status": "done",
         },
     )
 

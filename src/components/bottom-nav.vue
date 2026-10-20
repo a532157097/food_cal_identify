@@ -15,8 +15,8 @@
       hover-class="pressed"
       @tap="go('/pages/month/month')"
     >
-      <text class="nav-mark">月</text>
-      <text class="nav-label">本月</text>
+      <text class="nav-mark">历</text>
+      <text class="nav-label">历史</text>
     </view>
   </view>
 </template>

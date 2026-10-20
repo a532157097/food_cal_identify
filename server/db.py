@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS identify_record (
     raw_response TEXT NOT NULL DEFAULT '',
     debug_url TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
-    user_id INTEGER
+    user_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'done'
 );
 CREATE TABLE IF NOT EXISTS user_account (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,6 +55,10 @@ def init_db(db_path):
         columns = [row[1] for row in conn.execute("PRAGMA table_info(identify_record)")]
         if "user_id" not in columns:
             conn.execute("ALTER TABLE identify_record ADD COLUMN user_id INTEGER")
+        if "status" not in columns:
+            conn.execute(
+                "ALTER TABLE identify_record ADD COLUMN status TEXT NOT NULL DEFAULT 'done'"
+            )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_identify_user ON identify_record(user_id)")
         conn.commit()
     finally:
@@ -67,8 +72,8 @@ def insert_record(db_path, record):
             """
             INSERT INTO identify_record (
                 image_path, foods_json, total_calories_kcal, summary, tips,
-                raw_response, debug_url, created_at, user_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                raw_response, debug_url, created_at, user_id, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record["image_path"],
@@ -80,6 +85,7 @@ def insert_record(db_path, record):
                 record["debug_url"],
                 record["created_at"],
                 record["user_id"],
+                record.get("status") or "done",
             ),
         )
         conn.commit()
@@ -100,6 +106,7 @@ def _public_row(row):
         "tips": row["tips"],
         "debug_url": row["debug_url"],
         "created_at": row["created_at"],
+        "status": row["status"] if "status" in row.keys() else "done",
     }
 
 
@@ -175,14 +182,28 @@ def calendar_month(db_path, user_id, month):
         by_day = {}
         for row in rows:
             by_day[row["day"]] = row
+        energy_rows = conn.execute(
+            """
+            SELECT day, total_kcal
+            FROM energy_daily
+            WHERE user_id = ? AND day >= ? AND day < ?
+            """,
+            (user_id, start[:10], end[:10]),
+        ).fetchall()
+        energy_by_day = {}
+        for row in energy_rows:
+            energy_by_day[row["day"]] = row["total_kcal"]
         days = []
         for day_number in range(1, last_day + 1):
             key = "%04d-%02d-%02d" % (year, mon, day_number)
             row = by_day.get(key)
+            burn = energy_by_day.get(key)
             days.append({
                 "date": key,
                 "total_calories_kcal": round(float(row["kcal"]), 2) if row else 0,
                 "count": int(row["c"]) if row else 0,
+                "burn_kcal": round(float(burn), 2) if burn is not None else None,
+                "burn_saved": key in energy_by_day,
             })
         return {"month": "%04d-%02d" % (year, mon), "days": days}
     finally:
@@ -229,7 +250,7 @@ def replace_record(db_path, record_id, user_id, record):
             """
             UPDATE identify_record
             SET image_path = ?, foods_json = ?, total_calories_kcal = ?, summary = ?,
-                tips = ?, raw_response = ?, debug_url = ?
+                tips = ?, raw_response = ?, debug_url = ?, status = 'done'
             WHERE id = ? AND user_id = ?
             """,
             (
@@ -246,6 +267,64 @@ def replace_record(db_path, record_id, user_id, record):
         )
         conn.commit()
         return {"old_image_path": row["image_path"], "created_at": row["created_at"]}
+    finally:
+        conn.close()
+
+
+def reopen_failed_record(db_path, record_id, user_id):
+    conn = connect(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT image_path, created_at, status
+            FROM identify_record
+            WHERE id = ? AND user_id = ?
+            """,
+            (record_id, user_id),
+        ).fetchone()
+        if row is None:
+            return None
+        if row["status"] != "failed":
+            return False
+        conn.execute(
+            """
+            UPDATE identify_record
+            SET foods_json = '[]', total_calories_kcal = NULL, summary = '处理中',
+                tips = '', raw_response = '', debug_url = '', status = 'processing'
+            WHERE id = ? AND user_id = ? AND status = 'failed'
+            """,
+            (record_id, user_id),
+        )
+        conn.commit()
+        return {"image_path": row["image_path"], "created_at": row["created_at"]}
+    finally:
+        conn.close()
+
+
+def complete_identify_record(db_path, record_id, user_id, record):
+    conn = connect(db_path)
+    try:
+        cursor = conn.execute(
+            """
+            UPDATE identify_record
+            SET foods_json = ?, total_calories_kcal = ?, summary = ?, tips = ?,
+                raw_response = ?, debug_url = ?, status = ?
+            WHERE id = ? AND user_id = ? AND status = 'processing'
+            """,
+            (
+                json.dumps(record["foods"], ensure_ascii=False),
+                record["total_calories_kcal"],
+                record["summary"],
+                record["tips"],
+                record["raw_response"],
+                record["debug_url"],
+                record["status"],
+                record_id,
+                user_id,
+            ),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
     finally:
         conn.close()
 

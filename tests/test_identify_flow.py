@@ -127,6 +127,18 @@ def set_created_at(db_path, record_id, created_at):
         connection.close()
 
 
+def delete_energy(db_path, user_id, day):
+    connection = sqlite3.connect(str(db_path))
+    try:
+        connection.execute(
+            "DELETE FROM energy_daily WHERE user_id = ? AND day = ?",
+            (user_id, day),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def delete_ids(db_path, record_ids):
     connection = sqlite3.connect(str(db_path))
     try:
@@ -346,9 +358,12 @@ def check_legacy_database():
         connection = sqlite3.connect(str(legacy))
         columns = [row[1] for row in connection.execute("PRAGMA table_info(identify_record)")]
         kept = connection.execute("SELECT COUNT(*) FROM identify_record").fetchone()[0]
+        old_status = connection.execute("SELECT status FROM identify_record").fetchone()[0]
         connection.close()
         connection = None
         expect("user_id" in columns, "旧数据库没有补上 user_id")
+        expect("status" in columns, "旧数据库没有补上 status")
+        expect(old_status == "done", "旧记录的状态不是已完成")
         expect(kept == 1, "迁移把旧记录删掉了")
         listed = list_records(str(legacy), 1, 20, 0)
         expect(listed["total"] == 0, "没有主人的旧记录出现在用户列表里")
@@ -610,10 +625,41 @@ def check_api(db_path):
             days = calendar.json()["days"]
             expect(len(days) == calendar_mod.monthrange(now.year, now.month)[1], "月历天数不对")
             sql_days = day_sums(db_path, alice["id"], month)
+            saw_missing_burn = False
             for item in days:
                 sql_value = sql_days.get(item["date"], (0.0, 0))
                 expect(item["total_calories_kcal"] == sql_value[0], "月历 %s 热量和数据库不一致" % item["date"])
                 expect(item["count"] == sql_value[1], "月历 %s 条数和数据库不一致" % item["date"])
+                stored_burn = query_energy(db_path, alice["id"], item["date"])
+                if stored_burn is None:
+                    expect(item["burn_saved"] is False, "没有消耗的日期不应该标记已同步")
+                    expect(item["burn_kcal"] is None, "没有消耗的日期不应该带消耗数值")
+                    saw_missing_burn = True
+                else:
+                    expect(item["burn_saved"] is True, "已同步消耗的日期没有标记")
+                    expect(item["burn_kcal"] == stored_burn["total_kcal"], "月历 %s 消耗和数据库不一致" % item["date"])
+            expect(saw_missing_burn, "这个月每天都有消耗，没法核对空缺口")
+            gap_energy = client.post(
+                "/api/energy",
+                json={
+                    "username": "meal_alice",
+                    "password": "pass1234",
+                    "date": other_day,
+                    "resting_kcal": 1500,
+                    "active_kcal": 200,
+                },
+            )
+            expect(gap_energy.status_code == 200, "为月历写入消耗失败: %s" % gap_energy.text)
+            try:
+                refreshed = client.get("/api/calendar", params={"month": month}, headers=headers)
+                gap_day = next(item for item in refreshed.json()["days"] if item["date"] == other_day)
+                expect(gap_day["total_calories_kcal"] == 2000, "写入消耗后当天摄入变了")
+                expect(gap_day["burn_saved"] is True, "写入消耗后月历没有标记已同步")
+                expect(gap_day["burn_kcal"] == query_energy(db_path, alice["id"], other_day)["total_kcal"], "月历消耗和数据库不一致")
+                expect(gap_day["burn_kcal"] == 1700, "月历消耗不是 1700")
+            finally:
+                delete_energy(db_path, alice["id"], other_day)
+                expect(query_energy(db_path, alice["id"], other_day) is None, "月历测试写入的消耗没有删掉")
             exact = client.get("/api/records", params={"date": other_day}, headers=headers)
             expect(exact.json()["total_calories_kcal"] == 2000, "2000 千卡的日期汇总不正确")
 
@@ -639,6 +685,16 @@ def check_api(db_path):
             expect(bob_day.json()["total"] == 0, "其他用户看到了别人当天的记录")
             bob_calendar = client.get("/api/calendar", params={"month": month}, headers=bob_headers)
             expect(all(item["count"] == 0 for item in bob_calendar.json()["days"]), "其他用户的月历出现了别人的热量")
+            bob_user = query_user(db_path, "meal_bob")
+            for item in bob_calendar.json()["days"]:
+                stored_burn = query_energy(db_path, bob_user["id"], item["date"])
+                if stored_burn is None:
+                    expect(item["burn_saved"] is False, "其他用户看到了别人的消耗")
+                else:
+                    expect(item["burn_kcal"] == stored_burn["total_kcal"], "其他用户月历消耗和自己的数据库不一致")
+                    alice_burn = query_energy(db_path, alice["id"], item["date"])
+                    if alice_burn is not None:
+                        expect(item["burn_kcal"] != alice_burn["total_kcal"], "其他用户月历显示了别人的消耗")
             expect(day_sums(db_path, query_user(db_path, "meal_bob")["id"], month) == {}, "数据库里第二个用户不该有记录")
         finally:
             delete_ids(db_path, extra_ids)
@@ -677,12 +733,14 @@ def check_api(db_path):
         expect(submitted.status_code == 200, "提交识别失败: %s" % submitted.text)
         submitted_body = submitted.json()
         expect(submitted_body.get("status") == "processing", "提交接口应该立刻返回处理中")
+        expect(submitted_body.get("id"), "提交接口没有返回记录编号")
         expect("foods" not in submitted_body and "token" not in submitted_body, "提交接口不应该返回识别结果或登录令牌")
         expect(count_sessions(db_path) == sessions_before_submit, "提交识别不应该新建登录")
-        expect(count_rows(db_path) == rows_before_submit + 1, "后台识别没有写入记录")
-        submit_id = client.get("/api/records", params={"limit": 1}, headers=headers).json()["items"][0]["id"]
+        expect(count_rows(db_path) == rows_before_submit + 1, "提交后没有立刻写入记录")
+        submit_id = submitted_body["id"]
         submit_row = query_row(db_path, submit_id)
         expect(submit_row["user_id"] == alice["id"], "提交的识别没有记到对应用户名下")
+        expect(submit_row["status"] == "done", "后台识别成功后状态没有变成完成")
         expect(submit_row["total_calories_kcal"] == 274, "后台识别热量和模拟结果不一致")
         expect(json.loads(submit_row["foods_json"])[0]["name"] == "白米饭", "后台识别食物和模拟结果不一致")
         submit_image = Path(os.environ["FOOD_UPLOAD_DIR"]) / Path(submit_row["image_path"]).name
@@ -691,6 +749,59 @@ def check_api(db_path):
         expect(removed_submit.status_code == 200, "清理提交记录失败")
         expect(count_rows(db_path) == rows_before_submit, "清理后数据库条数没有回到提交前")
         expect(not submit_image.exists(), "清理后提交的图片还在")
+
+        from server.coze_client import CozeError
+
+        def fail_recognize(settings, image_path):
+            raise CozeError("工作流超时")
+
+        original_recognize = server_main.recognize
+        server_main.recognize = fail_recognize
+        try:
+            failed = client.post(
+                "/api/identify/submit",
+                data={"username": "meal_alice", "password": "pass1234"},
+                files={"file": ("meal.png", png, "image/png")},
+            )
+        finally:
+            server_main.recognize = original_recognize
+        expect(failed.status_code == 200, "失败的提交不应该把记录丢掉: %s" % failed.text)
+        failed_id = failed.json()["id"]
+        failed_row = query_row(db_path, failed_id)
+        expect(failed_row is not None, "识别失败后记录被删掉了")
+        expect(failed_row["status"] == "failed", "识别失败后状态不正确")
+        expect(failed_row["user_id"] == alice["id"], "失败记录没有记到对应用户名下")
+        expect(failed_row["summary"] == "工作流超时", "失败原因没有留在记录里")
+        expect(failed_row["total_calories_kcal"] is None, "失败记录不应该有热量")
+        failed_image = Path(os.environ["FOOD_UPLOAD_DIR"]) / Path(failed_row["image_path"]).name
+        expect(failed_image.is_file(), "识别失败后图片被删掉了")
+        kept_failed_at = failed_row["created_at"]
+        kept_failed_image = failed_row["image_path"]
+        guest_retry = client.post("/api/records/%s/reprocess" % failed_id)
+        expect(guest_retry.status_code == 401, "未登录不应该能重新处理")
+        expect(query_row(db_path, failed_id)["status"] == "failed", "未登录重新处理改掉了失败状态")
+        bob_retry = client.post("/api/records/%s/reprocess" % failed_id, headers=bob_headers)
+        expect(bob_retry.status_code == 404, "其他用户能重新处理别人的记录")
+        expect(query_row(db_path, failed_id)["status"] == "failed", "其他用户重新处理后原状态变了")
+        retried = client.post("/api/records/%s/reprocess" % failed_id, headers=headers)
+        expect(retried.status_code == 200, "重新处理失败: %s" % retried.text)
+        expect(retried.json()["status"] == "processing", "重新处理应该先返回处理中")
+        expect(retried.json()["id"] == failed_id, "重新处理不应该新建记录")
+        retried_row = query_row(db_path, failed_id)
+        expect(retried_row["status"] == "done", "重新处理后没有识别完成")
+        expect(retried_row["created_at"] == kept_failed_at, "重新处理改掉了记录时间")
+        expect(retried_row["image_path"] == kept_failed_image, "重新处理换掉了原图片")
+        expect(retried_row["total_calories_kcal"] == 274, "重新处理的热量和模拟结果不一致")
+        expect(json.loads(retried_row["foods_json"])[0]["name"] == "白米饭", "重新处理的食物和模拟结果不一致")
+        expect(failed_image.is_file(), "重新处理后原图片不在了")
+        expect(count_rows(db_path) == rows_before_submit + 1, "重新处理多写了一条记录")
+        again_retry = client.post("/api/records/%s/reprocess" % failed_id, headers=headers)
+        expect(again_retry.status_code == 400, "已完成的记录不应该重新处理")
+        expect(query_row(db_path, failed_id)["total_calories_kcal"] == 274, "拒绝重新处理后热量变了")
+        removed_failed = client.delete("/api/records/%s" % failed_id, headers=headers)
+        expect(removed_failed.status_code == 200, "清理失败记录失败")
+        expect(not failed_image.exists(), "清理后失败记录的图片还在")
+        expect(count_rows(db_path) == rows_before_submit, "清理失败记录后数据库条数没有回到提交前")
 
         client.post("/api/logout", headers=headers)
         expired = client.get("/api/records", headers=headers)

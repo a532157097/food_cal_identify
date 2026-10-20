@@ -6,16 +6,25 @@
       <image class="photo" :src="imageUrl" mode="aspectFill" @tap="preview"></image>
 
       <view class="total">
-        <text class="total-label">这一餐大约</text>
-        <view class="total-row">
-          <text class="total-num">{{ kcalText }}</text>
-          <text class="total-unit">千卡</text>
-        </view>
-        <text v-if="record.summary" class="summary">{{ record.summary }}</text>
+        <template v-if="record.status === 'processing' || record.status === 'failed'">
+          <text class="total-label">{{ record.status === 'processing' ? '处理中' : '识别失败' }}</text>
+          <text class="summary">{{ record.status === 'processing' ? '正在识别，稍后打开这条记录即可看到结果。' : (record.summary || '识别没有完成') }}</text>
+        </template>
+        <template v-else>
+          <text class="total-label">这一餐大约</text>
+          <view class="total-row">
+            <text class="total-num">{{ kcalText }}</text>
+            <text class="total-unit">千卡</text>
+          </view>
+          <text v-if="record.summary" class="summary">{{ record.summary }}</text>
+        </template>
         <text class="time">{{ record.created_at }}</text>
+        <view v-if="record.status === 'failed'" class="retry" hover-class="pressed" @tap="reprocess">
+          <text class="retry-text">{{ reprocessing ? '处理中' : '重新处理' }}</text>
+        </view>
       </view>
 
-      <view v-if="foods.length === 0" class="note">
+      <view v-if="record.status !== 'processing' && record.status !== 'failed' && foods.length === 0" class="note">
         <text class="note-text">这次没有拆出分项。如果上面是一段原文，请让 Coze 结束节点按约定输出 JSON。</text>
       </view>
 
@@ -45,7 +54,7 @@
         </view>
       </view>
 
-      <view v-if="record.tips" class="tips">
+      <view v-if="record.status !== 'processing' && record.status !== 'failed' && record.tips" class="tips">
         <text class="tips-label">建议</text>
         <text class="tips-text">{{ record.tips }}</text>
       </view>
@@ -58,7 +67,7 @@
 </template>
 
 <script>
-import { ensureLogin, request, resolveUrl } from '../../utils/api.js'
+import { ensureLogin, reprocessRecord, request, resolveUrl } from '../../utils/api.js'
 import { formatConfidence, formatGram, formatKcal } from '../../utils/format.js'
 
 export default {
@@ -66,6 +75,7 @@ export default {
     return {
       record: null,
       errorText: '',
+      reprocessing: false,
     }
   },
   computed: {
@@ -89,6 +99,19 @@ export default {
     this.load(id)
   },
   methods: {
+    reprocess() {
+      if (!this.record || this.record.status !== 'failed' || this.reprocessing) return
+      const id = this.record.id
+      this.reprocessing = true
+      reprocessRecord(id)
+        .then(() => this.load(id))
+        .catch((err) => {
+          uni.showToast({ title: (err && err.message) || '重新处理失败', icon: 'none' })
+        })
+        .then(() => {
+          this.reprocessing = false
+        })
+    },
     load(id) {
       request('/api/records/' + id)
         .then((body) => {
@@ -140,6 +163,22 @@ export default {
   color: #ff5c5c;
   font-size: 26rpx;
   line-height: 1.5;
+}
+
+.retry {
+  margin-top: 28rpx;
+  height: 88rpx;
+  border-radius: 44rpx;
+  background: #00c48c;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.retry-text {
+  color: #fff;
+  font-size: 30rpx;
+  font-weight: 600;
 }
 
 .photo {

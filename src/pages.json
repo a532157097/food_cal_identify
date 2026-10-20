@@ -11,7 +11,7 @@
     {
       "path": "pages/month/month",
       "style": {
-        "navigationBarTitleText": "本月",
+        "navigationBarTitleText": "历史",
         "navigationStyle": "custom",
         "backgroundColor": "#F5F6F8"
       }
