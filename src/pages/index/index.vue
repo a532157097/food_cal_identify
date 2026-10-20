@@ -65,7 +65,7 @@
           <text class="macro-value">{{ gramText(todayFat) }}</text>
         </view>
       </view>
-      <text v-if="burnSaved" class="burn-line">今日消耗 {{ kcalText(burnKcal) }} 千卡</text>
+      <text v-if="burnSaved" class="burn-line">今日消耗 {{ kcalText(burnKcal) }} 千卡 <text v-if="burnSyncedAt" class="burn-time">{{ burnSyncedAt }}</text></text>
       <text v-if="burnSaved" class="burn-line gap-line">热量缺口 <text :class="gapClass()">{{ kcalText(gapKcal()) }}</text> 千卡</text>
     </view>
 
@@ -119,6 +119,7 @@ export default {
       todayFat: 0,
       burnSaved: false,
       burnKcal: 0,
+      burnSyncedAt: '',
       todayItems: [],
       todayLoading: false,
       todayError: '',
@@ -201,6 +202,7 @@ export default {
           if (!body) return
           this.burnSaved = !!body.saved
           this.burnKcal = body.total_kcal || 0
+          this.burnSyncedAt = body && body.saved && body.updated_at ? String(body.updated_at).slice(11, 16) : ''
         })
         .catch((err) => {
           if (err && err.statusCode === 401) {
@@ -612,6 +614,11 @@ function pad(value) {
   margin-top: 18rpx;
   font-size: 26rpx;
   color: #5c6370;
+}
+
+.burn-time {
+  margin-left: 12rpx;
+  color: #a8adb5;
 }
 
 .gap-line {

@@ -132,6 +132,10 @@ export function reprocessRecord(recordId) {
   return request('/api/records/' + recordId + '/reprocess', { method: 'POST' })
 }
 
+export function reestimateRecord(recordId) {
+  return request('/api/records/' + recordId + '/reestimate', { method: 'POST' })
+}
+
 export function uploadRetake(recordId, filePath) {
   return uploadFile('/api/records/' + recordId + '/retake', filePath, '重拍失败')
 }

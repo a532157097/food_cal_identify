@@ -49,7 +49,7 @@ def query_energy(db_path, user_id, day):
     try:
         return connection.execute(
             """
-            SELECT resting_kcal, active_kcal, total_kcal
+            SELECT resting_kcal, active_kcal, total_kcal, updated_at
             FROM energy_daily
             WHERE user_id = ? AND day = ?
             """,
@@ -420,6 +420,7 @@ def check_api(db_path):
         empty_energy = client.get("/api/energy", params={"date": "2026-10-16"}, headers=headers)
         expect(empty_energy.status_code == 200, "读取空消耗失败")
         expect(empty_energy.json()["saved"] is False, "没有写入时不应该显示已保存")
+        expect(empty_energy.json()["updated_at"] is None, "没有同步时不应该有同步时间")
         sessions_before = count_sessions(db_path)
         wrong_energy = client.post(
             "/api/energy",
@@ -445,6 +446,8 @@ def check_api(db_path):
         )
         expect(saved_energy.status_code == 200, "写入消耗失败: %s" % saved_energy.text)
         expect(saved_energy.json()["total_kcal"] == 1720.5, "消耗合计不正确")
+        expect(saved_energy.json().get("updated_at"), "写入消耗没有返回同步时间")
+        expect(query_energy(db_path, alice["id"], "2026-10-16")["updated_at"] == saved_energy.json()["updated_at"], "写入返回的同步时间和数据库不一致")
         expect(count_sessions(db_path) == sessions_before, "同步消耗不应该新建登录")
         updated_energy = client.post(
             "/api/energy",
@@ -460,6 +463,10 @@ def check_api(db_path):
         expect(updated_energy.json()["total_kcal"] == 1900, "同一天应该覆盖而不是累加")
         stored_energy = query_energy(db_path, alice["id"], "2026-10-16")
         expect(stored_energy is not None and stored_energy["total_kcal"] == 1900, "数据库里的消耗和接口不一致")
+        expect(updated_energy.json()["updated_at"] == stored_energy["updated_at"], "再次同步后的时间和数据库不一致")
+        read_energy = client.get("/api/energy", params={"date": "2026-10-16"}, headers=headers)
+        expect(read_energy.status_code == 200, "读取已同步消耗失败")
+        expect(read_energy.json()["updated_at"] == stored_energy["updated_at"], "读取到的同步时间和数据库不一致")
         expect(count_energy(db_path, alice["id"], "2026-10-16") == 1, "同一天不应该有两条消耗")
         bad_energy = client.post(
             "/api/energy",
@@ -529,6 +536,48 @@ def check_api(db_path):
         other = client.post("/api/register", json={"username": "meal_bob", "password": "pass5678"})
         expect(other.status_code == 200, "第二个用户注册失败")
         bob_headers = {"Authorization": "Bearer " + other.json()["token"]}
+        kept_estimate_at = query_row(db_path, body["id"])["created_at"]
+        kept_estimate_image = query_row(db_path, body["id"])["image_path"]
+        guest_estimate = client.post("/api/records/%s/reestimate" % body["id"])
+        expect(guest_estimate.status_code == 401, "未登录不应该能重新估算")
+        expect(query_row(db_path, body["id"])["total_calories_kcal"] == 274, "未登录重新估算改掉了热量")
+        bob_estimate = client.post("/api/records/%s/reestimate" % body["id"], headers=bob_headers)
+        expect(bob_estimate.status_code == 404, "其他用户能重新估算别人的记录")
+        expect(query_row(db_path, body["id"])["image_path"] == kept_estimate_image, "其他用户重新估算后原图片变了")
+        estimated = client.post("/api/records/%s/reestimate" % body["id"], headers=headers)
+        expect(estimated.status_code == 200, "重新估算失败: %s" % estimated.text)
+        expect(estimated.json()["status"] == "processing", "重新估算应该先返回处理中")
+        expect(estimated.json()["id"] == body["id"], "重新估算不应该新建记录")
+        estimated_row = query_row(db_path, body["id"])
+        expect(estimated_row["status"] == "done", "重新估算后没有识别完成")
+        expect(estimated_row["created_at"] == kept_estimate_at, "重新估算改掉了记录时间")
+        expect(estimated_row["image_path"] == kept_estimate_image, "重新估算换掉了原图片")
+        expect(estimated_row["total_calories_kcal"] == 274, "重新估算的热量和模拟结果不一致")
+        expect(json.loads(estimated_row["foods_json"])[0]["name"] == "白米饭", "重新估算的食物和模拟结果不一致")
+        expect(count_rows(db_path) == before_count + 1, "重新估算多写了一条记录")
+        busy_conn = sqlite3.connect(str(db_path))
+        try:
+            busy_conn.execute(
+                "UPDATE identify_record SET status = 'processing' WHERE id = ?",
+                (body["id"],),
+            )
+            busy_conn.commit()
+        finally:
+            busy_conn.close()
+        busy_estimate = client.post("/api/records/%s/reestimate" % body["id"], headers=headers)
+        expect(busy_estimate.status_code == 400, "正在识别时不应该再次估算")
+        expect(query_row(db_path, body["id"])["status"] == "processing", "拒绝再次估算后状态变了")
+        expect(query_row(db_path, body["id"])["total_calories_kcal"] == 274, "拒绝再次估算后热量变了")
+        restore_conn = sqlite3.connect(str(db_path))
+        try:
+            restore_conn.execute(
+                "UPDATE identify_record SET status = 'done' WHERE id = ?",
+                (body["id"],),
+            )
+            restore_conn.commit()
+        finally:
+            restore_conn.close()
+        expect(query_row(db_path, body["id"])["status"] == "done", "估算测试没有把记录恢复成已完成")
         bob_energy = client.get("/api/energy", params={"date": "2026-10-16"}, headers=bob_headers)
         expect(bob_energy.status_code == 200 and bob_energy.json()["saved"] is False, "别人的消耗不应该被看到")
         bob_write = client.post(

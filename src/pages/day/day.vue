@@ -1,7 +1,29 @@
 <template>
   <view class="page">
     <view v-if="errorText" class="banner">{{ errorText }}</view>
-    <view class="total" :class="levelOf(totalKcal)">{{ kcalText(totalKcal) }} 千卡</view>
+    <view class="today-card">
+      <text class="today-label">当日合计</text>
+      <view class="today-figure">
+        <text class="today-kcal" :class="levelOf(totalKcal)">{{ kcalText(totalKcal) }}</text>
+        <text class="today-unit">千卡</text>
+      </view>
+      <view class="macro-row">
+        <view class="macro">
+          <text class="macro-label">蛋白质</text>
+          <text class="macro-value">{{ gramText(protein) }}</text>
+        </view>
+        <view class="macro macro-gap">
+          <text class="macro-label">碳水</text>
+          <text class="macro-value">{{ gramText(carb) }}</text>
+        </view>
+        <view class="macro macro-gap">
+          <text class="macro-label">脂肪</text>
+          <text class="macro-value">{{ gramText(fat) }}</text>
+        </view>
+      </view>
+      <text v-if="burnSaved" class="burn-line">当日消耗 {{ kcalText(burnKcal) }} 千卡 <text v-if="burnSyncedAt" class="burn-time">{{ burnSyncedAt }}</text></text>
+      <text v-if="burnSaved" class="burn-line gap-line">热量缺口 <text :class="gapClass()">{{ kcalText(gapKcal()) }}</text> 千卡</text>
+    </view>
 
     <view v-if="!loading && items.length === 0" class="empty">
       <text class="empty-title">这一天没有记录</text>
@@ -32,7 +54,7 @@
 <script>
 import { ensureLogin, reprocessRecord, request, resolveUrl, uploadRetake } from '../../utils/api.js'
 import { compressPhoto } from '../../utils/image.js'
-import { calorieLevel, foodNames, formatKcal } from '../../utils/format.js'
+import { calorieLevel, foodNames, formatGram, formatKcal } from '../../utils/format.js'
 
 export default {
   data() {
@@ -40,6 +62,12 @@ export default {
       date: '',
       items: [],
       totalKcal: 0,
+      protein: 0,
+      carb: 0,
+      fat: 0,
+      burnSaved: false,
+      burnKcal: 0,
+      burnSyncedAt: '',
       loading: false,
       errorText: '',
       retakingId: 0,
@@ -66,8 +94,19 @@ export default {
         .then((body) => {
           const items = (body && body.items) || []
           items.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
+          const totals = sumNutrition(items)
           this.items = items
           this.totalKcal = body && body.total_calories_kcal ? body.total_calories_kcal : 0
+          this.protein = totals.protein
+          this.carb = totals.carb
+          this.fat = totals.fat
+          return request('/api/energy?date=' + this.date)
+        })
+        .then((body) => {
+          if (!body) return
+          this.burnSaved = !!body.saved
+          this.burnKcal = body.total_kcal || 0
+          this.burnSyncedAt = body && body.saved && body.updated_at ? String(body.updated_at).slice(11, 16) : ''
         })
         .catch((err) => {
           if (err && err.statusCode === 401) {
@@ -85,6 +124,17 @@ export default {
     },
     kcalText(value) {
       return formatKcal(value)
+    },
+    gramText(value) {
+      return formatGram(value)
+    },
+    gapKcal() {
+      const burn = Number(this.burnKcal) || 0
+      const intake = Number(this.totalKcal) || 0
+      return Math.round((burn - intake) * 10) / 10
+    },
+    gapClass() {
+      return this.gapKcal() < 0 ? 'gap-over' : 'gap-ok'
     },
     imageOf(item) {
       return resolveUrl(item.image_url)
@@ -182,6 +232,20 @@ export default {
     },
   },
 }
+
+function sumNutrition(items) {
+  const totals = { protein: 0, carb: 0, fat: 0 }
+  ;(items || []).forEach((item) => {
+    const foods = item && item.foods
+    if (!Array.isArray(foods)) return
+    foods.forEach((food) => {
+      totals.protein += Number(food && food.protein_g) || 0
+      totals.carb += Number(food && food.carb_g) || 0
+      totals.fat += Number(food && food.fat_g) || 0
+    })
+  })
+  return totals
+}
 </script>
 
 <style>
@@ -200,17 +264,95 @@ export default {
   font-size: 26rpx;
 }
 
-.total {
+.today-card {
   margin-bottom: 24rpx;
-  font-size: 48rpx;
-  font-weight: 700;
+  padding: 28rpx 32rpx;
+  border-radius: 28rpx;
+  background: #ffffff;
+  box-shadow: 0 8rpx 28rpx rgba(31, 35, 41, 0.05);
 }
 
-.total.ok {
+.today-label {
+  display: block;
+  font-size: 26rpx;
+  color: #8b919a;
+}
+
+.today-figure {
+  display: flex;
+  align-items: flex-end;
+  margin-top: 8rpx;
+}
+
+.today-kcal {
+  font-size: 84rpx;
+  line-height: 1;
+  font-weight: 800;
+}
+
+.today-kcal.ok {
   color: #00c48c;
 }
 
-.total.over {
+.today-kcal.over {
+  color: #ff5c5c;
+}
+
+.today-unit {
+  margin-left: 10rpx;
+  margin-bottom: 8rpx;
+  font-size: 26rpx;
+  color: #8b919a;
+}
+
+.macro-row {
+  display: flex;
+  margin-top: 20rpx;
+}
+
+.macro {
+  flex: 1;
+}
+
+.macro-gap {
+  margin-left: 16rpx;
+}
+
+.macro-label {
+  display: block;
+  font-size: 22rpx;
+  color: #a8adb5;
+}
+
+.macro-value {
+  display: block;
+  margin-top: 4rpx;
+  font-size: 30rpx;
+  font-weight: 600;
+  color: #1f2329;
+}
+
+.burn-line {
+  display: block;
+  margin-top: 18rpx;
+  font-size: 26rpx;
+  color: #5c6370;
+}
+
+.burn-time {
+  margin-left: 12rpx;
+  color: #a8adb5;
+}
+
+.gap-line {
+  margin-top: 8rpx;
+}
+
+.gap-ok {
+  color: #00c48c;
+}
+
+.gap-over {
   color: #ff5c5c;
 }
 

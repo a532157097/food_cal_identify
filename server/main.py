@@ -30,6 +30,7 @@ from .db import (
     complete_identify_record,
     get_energy_day,
     reopen_failed_record,
+    reopen_record_for_estimate,
     get_record,
     init_db,
     insert_record,
@@ -210,6 +211,26 @@ def create_app():
             raise HTTPException(status_code=404, detail="记录不存在")
         if opened is False:
             raise HTTPException(status_code=400, detail="只有识别失败的记录可以重新处理")
+        background_tasks.add_task(
+            _recognize_stored_image,
+            app.state.settings,
+            record_id,
+            user["id"],
+        )
+        return {"ok": True, "status": "processing", "id": record_id}
+
+    @app.post("/api/records/{record_id}/reestimate")
+    def reestimate_record(
+        record_id: int,
+        background_tasks: BackgroundTasks,
+        authorization: str = Header(default=""),
+    ):
+        user = _require_user(app.state.settings["db_path"], authorization)
+        opened = reopen_record_for_estimate(app.state.settings["db_path"], record_id, user["id"])
+        if opened is None:
+            raise HTTPException(status_code=404, detail="记录不存在")
+        if opened is False:
+            raise HTTPException(status_code=400, detail="正在识别，请稍后再估算")
         background_tasks.add_task(
             _recognize_stored_image,
             app.state.settings,

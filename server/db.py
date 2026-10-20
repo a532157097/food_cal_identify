@@ -301,6 +301,36 @@ def reopen_failed_record(db_path, record_id, user_id):
         conn.close()
 
 
+def reopen_record_for_estimate(db_path, record_id, user_id):
+    conn = connect(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT image_path, created_at, status
+            FROM identify_record
+            WHERE id = ? AND user_id = ?
+            """,
+            (record_id, user_id),
+        ).fetchone()
+        if row is None:
+            return None
+        if row["status"] == "processing":
+            return False
+        conn.execute(
+            """
+            UPDATE identify_record
+            SET foods_json = '[]', total_calories_kcal = NULL, summary = '处理中',
+                tips = '', raw_response = '', debug_url = '', status = 'processing'
+            WHERE id = ? AND user_id = ? AND status != 'processing'
+            """,
+            (record_id, user_id),
+        )
+        conn.commit()
+        return {"image_path": row["image_path"], "created_at": row["created_at"]}
+    finally:
+        conn.close()
+
+
 def complete_identify_record(db_path, record_id, user_id, record):
     conn = connect(db_path)
     try:
@@ -374,6 +404,7 @@ def save_energy_day(db_path, user_id, day, resting_kcal, active_kcal, updated_at
             "active_kcal": active,
             "total_kcal": total,
             "saved": True,
+            "updated_at": updated_at,
         }
     finally:
         conn.close()
@@ -384,7 +415,7 @@ def get_energy_day(db_path, user_id, day):
     try:
         row = conn.execute(
             """
-            SELECT day, resting_kcal, active_kcal, total_kcal
+            SELECT day, resting_kcal, active_kcal, total_kcal, updated_at
             FROM energy_daily
             WHERE user_id = ? AND day = ?
             """,
@@ -397,6 +428,7 @@ def get_energy_day(db_path, user_id, day):
                 "active_kcal": 0,
                 "total_kcal": 0,
                 "saved": False,
+                "updated_at": None,
             }
         return {
             "date": row["day"],
@@ -404,6 +436,7 @@ def get_energy_day(db_path, user_id, day):
             "active_kcal": row["active_kcal"],
             "total_kcal": row["total_kcal"],
             "saved": True,
+            "updated_at": row["updated_at"],
         }
     finally:
         conn.close()

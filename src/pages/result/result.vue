@@ -59,15 +59,15 @@
         <text class="tips-text">{{ record.tips }}</text>
       </view>
 
-      <view v-if="record.debug_url" class="debug" hover-class="pressed" @tap="copyDebug">
-        <text class="debug-text">复制工作流调试链接</text>
+      <view v-if="record.status !== 'processing'" class="retry" hover-class="pressed" @tap="reestimate">
+        <text class="retry-text">{{ reestimating ? '估算中' : '重新估算' }}</text>
       </view>
     </view>
   </view>
 </template>
 
 <script>
-import { ensureLogin, reprocessRecord, request, resolveUrl } from '../../utils/api.js'
+import { ensureLogin, reestimateRecord, reprocessRecord, request, resolveUrl } from '../../utils/api.js'
 import { formatConfidence, formatGram, formatKcal } from '../../utils/format.js'
 
 export default {
@@ -77,6 +77,7 @@ export default {
       recordId: '',
       errorText: '',
       reprocessing: false,
+      reestimating: false,
       pollTimer: 0,
     }
   },
@@ -136,6 +137,19 @@ export default {
           this.reprocessing = false
         })
     },
+    reestimate() {
+      if (!this.record || this.record.status === 'processing' || this.reestimating) return
+      const id = this.record.id
+      this.reestimating = true
+      reestimateRecord(id)
+        .then(() => this.load(id))
+        .catch((err) => {
+          uni.showToast({ title: (err && err.message) || '重新估算失败', icon: 'none' })
+        })
+        .then(() => {
+          this.reestimating = false
+        })
+    },
     load(id) {
       request('/api/records/' + id)
         .then((body) => {
@@ -165,10 +179,6 @@ export default {
     preview() {
       if (!this.imageUrl) return
       uni.previewImage({ urls: [this.imageUrl], current: this.imageUrl })
-    },
-    copyDebug() {
-      if (!this.record || !this.record.debug_url) return
-      uni.setClipboardData({ data: this.record.debug_url })
     },
   },
 }
@@ -381,16 +391,6 @@ export default {
   font-size: 28rpx;
   color: #1f2329;
   font-weight: 600;
-}
-
-.debug {
-  margin-top: 28rpx;
-  text-align: center;
-}
-
-.debug-text {
-  font-size: 24rpx;
-  color: #a8adb5;
 }
 
 .pressed {
