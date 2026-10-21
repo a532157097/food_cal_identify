@@ -793,6 +793,100 @@ def check_api(db_path):
         expect(not failed_page_image.exists(), "清理后页面失败记录的图片还在")
         expect(count_rows(db_path) == rows_before_submit, "清理页面失败记录后数据库条数没有回到提交前")
 
+        import httpx
+        import server.coze_client as coze_client
+
+        original_once = coze_client._recognize_once
+        retry_calls = {"n": 0}
+
+        def fail_twice_then_ok(settings, image_path):
+            retry_calls["n"] += 1
+            if retry_calls["n"] == 1:
+                raise CozeError("工作流超时")
+            if retry_calls["n"] == 2:
+                raise httpx.ConnectError("连接失败")
+            return original_once(settings, image_path)
+
+        coze_client._recognize_once = fail_twice_then_ok
+        try:
+            recovered = client.post(
+                "/api/identify/submit",
+                data={"username": "meal_alice", "password": "pass1234"},
+                files={"file": ("meal.png", png, "image/png")},
+            )
+        finally:
+            coze_client._recognize_once = original_once
+        expect(recovered.status_code == 200, "失败后重试的提交失败: %s" % recovered.text)
+        recovered_id = recovered.json()["id"]
+        recovered_row = query_row(db_path, recovered_id)
+        expect(retry_calls["n"] == 3, "接口失败后没有重试到成功")
+        expect(recovered_row["status"] == "done", "重试成功后状态没有变成完成")
+        expect(recovered_row["total_calories_kcal"] == 274, "重试成功的热量和模拟结果不一致")
+        expect(json.loads(recovered_row["foods_json"])[0]["name"] == "白米饭", "重试成功的食物和模拟结果不一致")
+        expect(count_rows(db_path) == rows_before_submit + 1, "重试成功多写了一条记录")
+        recovered_image = Path(os.environ["FOOD_UPLOAD_DIR"]) / Path(recovered_row["image_path"]).name
+        removed_recovered = client.delete("/api/records/%s" % recovered_id, headers=headers)
+        expect(removed_recovered.status_code == 200, "清理重试成功记录失败")
+        expect(not recovered_image.exists(), "清理后重试成功的图片还在")
+        expect(count_rows(db_path) == rows_before_submit, "清理重试成功记录后数据库条数没有回到提交前")
+
+        exhausted_calls = {"n": 0}
+
+        def always_fail(settings, image_path):
+            exhausted_calls["n"] += 1
+            raise CozeError("工作流超时")
+
+        coze_client._recognize_once = always_fail
+        try:
+            exhausted = client.post(
+                "/api/identify/submit",
+                data={"username": "meal_alice", "password": "pass1234"},
+                files={"file": ("meal.png", png, "image/png")},
+            )
+        finally:
+            coze_client._recognize_once = original_once
+        expect(exhausted.status_code == 200, "重试耗尽后不应该把记录丢掉: %s" % exhausted.text)
+        exhausted_id = exhausted.json()["id"]
+        exhausted_row = query_row(db_path, exhausted_id)
+        expect(exhausted_calls["n"] == 4, "接口失败没有重试满 3 次")
+        expect(exhausted_row["status"] == "failed", "重试耗尽后状态不是失败")
+        expect(exhausted_row["summary"] == "工作流超时", "重试耗尽后的失败原因不对")
+        expect(exhausted_row["total_calories_kcal"] is None, "重试耗尽后不应该有热量")
+        exhausted_image = Path(os.environ["FOOD_UPLOAD_DIR"]) / Path(exhausted_row["image_path"]).name
+        expect(exhausted_image.is_file(), "重试耗尽后图片被删掉了")
+        removed_exhausted = client.delete("/api/records/%s" % exhausted_id, headers=headers)
+        expect(removed_exhausted.status_code == 200, "清理重试耗尽记录失败")
+        expect(not exhausted_image.exists(), "清理后重试耗尽的图片还在")
+        expect(count_rows(db_path) == rows_before_submit, "清理重试耗尽记录后数据库条数没有回到提交前")
+
+        empty_calls = {"n": 0}
+
+        def empty_foods(settings, image_path):
+            empty_calls["n"] += 1
+            return {"code": 0, "data": "[]", "debug_url": "", "msg": ""}
+
+        coze_client._recognize_once = empty_foods
+        try:
+            empty_result = client.post(
+                "/api/identify/submit",
+                data={"username": "meal_alice", "password": "pass1234"},
+                files={"file": ("meal.png", png, "image/png")},
+            )
+        finally:
+            coze_client._recognize_once = original_once
+        expect(empty_result.status_code == 200, "空列表提交失败: %s" % empty_result.text)
+        empty_id = empty_result.json()["id"]
+        empty_row = query_row(db_path, empty_id)
+        expect(empty_calls["n"] == 1, "返回空列表时不应该重试")
+        expect(empty_row["status"] == "done", "空列表不应该记成调用失败")
+        expect(json.loads(empty_row["foods_json"]) == [], "空列表结果和数据库不一致")
+        expect(empty_row["summary"] == "没有识别到食物", "空列表说明不正确")
+        empty_image = Path(os.environ["FOOD_UPLOAD_DIR"]) / Path(empty_row["image_path"]).name
+        removed_empty = client.delete("/api/records/%s" % empty_id, headers=headers)
+        expect(removed_empty.status_code == 200, "清理空列表记录失败")
+        expect(not empty_image.exists(), "清理后空列表的图片还在")
+        expect(count_rows(db_path) == rows_before_submit, "清理空列表记录后数据库条数没有回到提交前")
+
         client.post("/api/logout", headers=headers)
         expired = client.get("/api/records", headers=headers)
         expect(expired.status_code == 401, "退出后旧令牌还能查记录")

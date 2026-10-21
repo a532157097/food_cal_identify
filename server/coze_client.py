@@ -43,6 +43,18 @@ def build_image_value(file_id, style):
 
 
 def recognize(settings, path):
+    last_error = None
+    for attempt in range(4):
+        try:
+            return _recognize_once(settings, path)
+        except (CozeError, httpx.HTTPError, OSError) as exc:
+            last_error = exc
+            if attempt == 3:
+                raise
+    raise last_error
+
+
+def _recognize_once(settings, path):
     if settings["coze_mock"]:
         return {
             "code": 0,
